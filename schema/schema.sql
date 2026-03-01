@@ -8,6 +8,10 @@ CREATE TABLE users (
     username VARCHAR(50) UNIQUE NOT NULL, -- Human readable ID
     identity_key_public BLOB NOT NULL, -- Long-term Identity Public Key (IK)
     registration_id INT NOT NULL, -- Signal-specific ID for the device
+    -- Argon2id hash (time_cost=3, memory_cost=65536, parallelism=4).
+    -- One-way: irrecoverable by users or service operators.
+    password_hash VARCHAR(255) NOT NULL,
+    deleted INT NOT NULL DEFAULT 0, -- 0 = active, 1 = soft-deleted
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );

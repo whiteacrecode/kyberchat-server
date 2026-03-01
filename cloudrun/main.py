@@ -1,9 +1,11 @@
 import os
 import logging
-import urllib.parse
 from flask import Flask, request, jsonify
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import URL
 from sqlalchemy.exc import IntegrityError
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHashError
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -12,85 +14,91 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Database configuration from environment variables
+# Argon2id hasher — OWASP-recommended parameters.
+# The resulting hash is one-way and cannot be recovered by the user or service owner.
+# time_cost=3 iterations, memory_cost=65536 KB (64 MB), parallelism=4 threads
+ph = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
+
+# --- Database Configuration ---
 DB_USER = os.environ.get('DB_USER')
 DB_PASS = os.environ.get('DB_PASS')
 DB_NAME = os.environ.get('DB_NAME')
-DB_HOST = os.environ.get('DB_HOST') # e.g., /cloudsql/project:region:instance for Unix socket or IP for TCP
+DB_HOST = os.environ.get('DB_HOST')
 
-# Construct the database URL
-# Assuming Cloud SQL with PyMySQL
-# For TCP: mysql+pymysql://user:pass@host/dbname
-# For Unix Socket: mysql+pymysql://user:pass@/dbname?unix_socket=/cloudsql/INSTANCE_CONNECTION_NAME
-
-if DB_USER:
-    db_user_escaped = urllib.parse.quote_plus(DB_USER)
-else:
-    db_user_escaped = DB_USER
-
-if DB_PASS:
-    db_pass_escaped = urllib.parse.quote_plus(DB_PASS)
-else:
-    db_pass_escaped = DB_PASS
-
-if DB_HOST and DB_HOST.startswith('/'):
-    db_url = f"mysql+pymysql://{db_user_escaped}:{db_pass_escaped}@/{DB_NAME}?unix_socket={DB_HOST}"
-else:
-    db_url = f"mysql+pymysql://{db_user_escaped}:{db_pass_escaped}@{DB_HOST}/{DB_NAME}"
+def get_db_url():
+    """
+    Constructs the SQLAlchemy URL.
+    Handles Unix Sockets for Cloud Run and TCP for local development.
+    """
+    if DB_HOST and DB_HOST.startswith('/'):
+        # Unix Socket (Google Cloud Run)
+        return URL.create(
+            drivername="mysql+pymysql",
+            username=DB_USER,
+            password=DB_PASS,
+            database=DB_NAME,
+            query={"unix_socket": DB_HOST}
+        )
+    else:
+        # TCP Connection (Local Dev / External IP)
+        return URL.create(
+            drivername="mysql+pymysql",
+            username=DB_USER,
+            password=DB_PASS,
+            host=DB_HOST or "127.0.0.1",
+            database=DB_NAME
+        )
 
 # Create SQLAlchemy engine
-engine = create_engine(db_url, pool_size=5, max_overflow=2, pool_timeout=30, pool_recycle=1800)
+# pool_pre_ping=True checks if the connection is alive before using it
+engine = create_engine(
+    get_db_url(),
+    pool_size=5,
+    max_overflow=2,
+    pool_timeout=30,
+    pool_recycle=1800,
+    pool_pre_ping=True
+)
 
 @app.route('/create_user', methods=['POST'])
 def create_user():
     """
     Creates a new user in the database.
-    Expected JSON payload:
-    {
-        "user_uuid": "UUID string",
-        "username": "string",
-        "identity_key_public": "hex or base64 string (stored as BLOB)",
-        "registration_id": 12345
-    }
     """
     try:
         data = request.get_json()
         if not data:
             return jsonify({'error': 'Invalid JSON'}), 400
-        
-        required_fields = ['user_uuid', 'username', 'identity_key_public', 'registration_id']
+
+        required_fields = ['user_uuid', 'username', 'identity_key_public', 'registration_id', 'password']
         for field in required_fields:
             if field not in data:
                 return jsonify({'error': f'Missing field: {field}'}), 400
 
         user_uuid = data['user_uuid']
         username = data['username']
-        # Convert identity_key_public to bytes if it's sent as hex/base64, or store as is if client handles encoding
-        # Assuming client sends hex string for simplicity in this example, or raw bytes if content-type is appropriate.
-        # For this example, we'll assume the client sends a hex string and we convert to bytes for BLOB storage.
-        # If the client sends base64, change accordingly.
-        # Here we assume the input is a string representation that the DB can handle or we encode it.
-        # Let's assume it's sent as a hex string.
+        password = data['password']
+
         try:
-             # Basic hex validation/conversion if needed. 
-             # For now, we'll store it directly if the DB driver handles it, or encode to bytes.
-             # SQLAlchemy/PyMySQL usually handles bytes for BLOBs.
-             identity_key_public = bytes.fromhex(data['identity_key_public'])
+            # Assuming the client sends a hex string
+            identity_key_public = bytes.fromhex(data['identity_key_public'])
         except ValueError:
-             return jsonify({'error': 'identity_key_public must be a valid hex string'}), 400
+            return jsonify({'error': 'identity_key_public must be a valid hex string'}), 400
 
         registration_id = data['registration_id']
+        password_hash = ph.hash(password)
 
         with engine.connect() as connection:
             query = text("""
-                INSERT INTO users (user_uuid, username, identity_key_public, registration_id)
-                VALUES (:user_uuid, :username, :identity_key_public, :registration_id)
+                INSERT INTO users (user_uuid, username, identity_key_public, registration_id, password_hash)
+                VALUES (:user_uuid, :username, :identity_key_public, :registration_id, :password_hash)
             """)
             connection.execute(query, {
                 'user_uuid': user_uuid,
                 'username': username,
                 'identity_key_public': identity_key_public,
-                'registration_id': registration_id
+                'registration_id': registration_id,
+                'password_hash': password_hash
             })
             connection.commit()
 
@@ -107,40 +115,54 @@ def create_user():
 @app.route('/validate_login', methods=['POST'])
 def validate_login():
     """
-    Validates a user login by checking if the username exists.
-    Expected JSON payload:
-    {
-        "username": "string"
-    }
+    Validates a user login by verifying username and password.
+    Returns a generic error for both bad username and bad password to
+    prevent username enumeration.
     """
     try:
         data = request.get_json()
-        if not data or 'username' not in data:
-            return jsonify({'error': 'Missing username'}), 400
+        if not data or 'username' not in data or 'password' not in data:
+            return jsonify({'error': 'Missing username or password'}), 400
 
         username = data['username']
+        password = data['password']
 
         with engine.connect() as connection:
             query = text("""
-                SELECT user_uuid, username, registration_id, created_at 
-                FROM users 
-                WHERE username = :username
+                SELECT user_uuid, username, registration_id, created_at, password_hash
+                FROM users
+                WHERE username = :username AND deleted = 0
             """)
             result = connection.execute(query, {'username': username}).fetchone()
 
-        if result:
-            # Found user
-            user_data = {
-                'user_uuid': result[0],
-                'username': result[1],
-                'registration_id': result[2],
-                'created_at': result[3].isoformat() if result[3] else None
-            }
-            logger.info(f"Login validated for: {username}")
-            return jsonify({'message': 'User found', 'user': user_data}), 200
-        else:
+        if not result:
             logger.warning(f"Login failed: User not found {username}")
-            return jsonify({'error': 'User not found'}), 404
+            return jsonify({'error': 'Invalid username or password'}), 401
+
+        try:
+            ph.verify(result[4], password)
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            logger.warning(f"Login failed: Bad password for {username}")
+            return jsonify({'error': 'Invalid username or password'}), 401
+
+        # Transparently rehash if the stored hash was produced with outdated parameters
+        if ph.check_needs_rehash(result[4]):
+            new_hash = ph.hash(password)
+            with engine.connect() as connection:
+                connection.execute(
+                    text("UPDATE users SET password_hash = :h WHERE user_uuid = :u"),
+                    {'h': new_hash, 'u': result[0]}
+                )
+                connection.commit()
+
+        user_data = {
+            'user_uuid': result[0],
+            'username': result[1],
+            'registration_id': result[2],
+            'created_at': result[3].isoformat() if result[3] else None
+        }
+        logger.info(f"Login validated for: {username}")
+        return jsonify({'message': 'User found', 'user': user_data}), 200
 
     except Exception as e:
         logger.error(f"Error validating login: {e}")
@@ -149,11 +171,7 @@ def validate_login():
 @app.route('/update_auth', methods=['POST'])
 def update_auth():
     """
-    Updates authentication details (e.g., last_seen) for a user.
-    Expected JSON payload:
-    {
-        "user_uuid": "UUID string"
-    }
+    Updates last_seen for a user.
     """
     try:
         data = request.get_json()
@@ -163,12 +181,10 @@ def update_auth():
         user_uuid = data['user_uuid']
 
         with engine.connect() as connection:
-            # Check if user exists first (optional, but good for explicit errors)
-            # Or just update and check rowcount
             query = text("""
-                UPDATE users 
-                SET last_seen = CURRENT_TIMESTAMP 
-                WHERE user_uuid = :user_uuid
+                UPDATE users
+                SET last_seen = CURRENT_TIMESTAMP
+                WHERE user_uuid = :user_uuid AND deleted = 0
             """)
             result = connection.execute(query, {'user_uuid': user_uuid})
             connection.commit()
@@ -183,7 +199,98 @@ def update_auth():
         logger.error(f"Error updating auth: {e}")
         return jsonify({'error': 'Internal server error'}), 500
 
+@app.route('/delete_user', methods=['POST'])
+def delete_user():
+    """
+    Soft-deletes a user by setting deleted = 1.
+    Requires the user's password to confirm the action.
+    """
+    try:
+        data = request.get_json()
+        if not data or 'user_uuid' not in data or 'password' not in data:
+            return jsonify({'error': 'Missing user_uuid or password'}), 400
+
+        user_uuid = data['user_uuid']
+        password = data['password']
+
+        with engine.connect() as connection:
+            result = connection.execute(
+                text("SELECT password_hash FROM users WHERE user_uuid = :u AND deleted = 0"),
+                {'u': user_uuid}
+            ).fetchone()
+
+        if not result:
+            return jsonify({'error': 'User not found'}), 404
+
+        try:
+            ph.verify(result[0], password)
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            return jsonify({'error': 'Invalid password'}), 401
+
+        with engine.connect() as connection:
+            connection.execute(
+                text("UPDATE users SET deleted = 1 WHERE user_uuid = :u"),
+                {'u': user_uuid}
+            )
+            connection.commit()
+
+        logger.info(f"User soft-deleted: {user_uuid}")
+        return jsonify({'message': 'User deleted successfully'}), 200
+
+    except Exception as e:
+        logger.error(f"Error deleting user: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/change_password', methods=['POST'])
+def change_password():
+    """
+    Changes a user's password. Requires the current password to be correct
+    before the new password is accepted.
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON'}), 400
+
+        required_fields = ['user_uuid', 'old_password', 'new_password']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({'error': f'Missing field: {field}'}), 400
+
+        user_uuid = data['user_uuid']
+        old_password = data['old_password']
+        new_password = data['new_password']
+
+        with engine.connect() as connection:
+            result = connection.execute(
+                text("SELECT password_hash FROM users WHERE user_uuid = :u AND deleted = 0"),
+                {'u': user_uuid}
+            ).fetchone()
+
+        if not result:
+            return jsonify({'error': 'User not found'}), 404
+
+        try:
+            ph.verify(result[0], old_password)
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            return jsonify({'error': 'Invalid password'}), 401
+
+        new_hash = ph.hash(new_password)
+        with engine.connect() as connection:
+            connection.execute(
+                text("UPDATE users SET password_hash = :h WHERE user_uuid = :u"),
+                {'h': new_hash, 'u': user_uuid}
+            )
+            connection.commit()
+
+        logger.info(f"Password changed for: {user_uuid}")
+        return jsonify({'message': 'Password changed successfully'}), 200
+
+    except Exception as e:
+        logger.error(f"Error changing password: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
 if __name__ == "__main__":
-    # Local development server
+    # Cloud Run provides the PORT environment variable
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
