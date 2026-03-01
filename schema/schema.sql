@@ -1,0 +1,52 @@
+CREATE DATABASE IF NOT EXISTS e2e_chat_service;
+USE e2e_chat_service;
+
+-- 1. Users Table
+-- Stores basic identity. No PII (Email/Phone) as per requirements.
+CREATE TABLE users (
+    user_uuid CHAR(36) PRIMARY KEY, -- Generated on client or server
+    username VARCHAR(50) UNIQUE NOT NULL, -- Human readable ID
+    identity_key_public BLOB NOT NULL, -- Long-term Identity Public Key (IK)
+    registration_id INT NOT NULL, -- Signal-specific ID for the device
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- 2. Signed Pre-Keys Table
+-- Medium-term keys signed by the Identity Key. Rotated periodically.
+CREATE TABLE signed_pre_keys (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_uuid CHAR(36) NOT NULL,
+    key_id INT NOT NULL, -- Client-side identifier for the key
+    public_key BLOB NOT NULL,
+    signature BLOB NOT NULL, -- Signature of the public key using IK
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE,
+    INDEX (user_uuid)
+);
+
+-- 3. One-Time Pre-Keys Table
+-- A pool of keys consumed when someone starts a chat with this user.
+-- This is critical for "Asynchronous" key exchange.
+CREATE TABLE one_time_pre_keys (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_uuid CHAR(36) NOT NULL,
+    key_id INT NOT NULL,
+    public_key BLOB NOT NULL,
+    is_consumed BOOLEAN DEFAULT FALSE, -- Set to TRUE once a peer uses it
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE,
+    INDEX (user_uuid, is_consumed)
+);
+
+-- 4. Devices/Sessions Table (Optional but Recommended)
+-- Tracks which devices a user has registered (e.g., iPhone vs Android).
+CREATE TABLE user_devices (
+    device_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_uuid CHAR(36) NOT NULL,
+    push_token VARCHAR(255), -- For FCM (Android) or APNs (iOS)
+    platform ENUM('ios', 'android') NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE
+);
+
