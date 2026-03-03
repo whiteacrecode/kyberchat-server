@@ -1,4 +1,6 @@
-# Project: Privacy-First E2EE Chat App (Kotlin/Swift/GCP)
+# Project: Privacy-First E2EE post quantum Chat App (Kotlin/Swift/GCP)
+
+Please read technical plan at https://docs.google.com/document/d/1ed1ZChYBov-3MVqU6XsdMiyLYhVLLbpnXMvtpuUOu9s/edit?usp=sharing
 
 ## 1. Project Overview
 A "Zero-Knowledge" end-to-end encrypted chat application.
@@ -51,10 +53,3 @@ CREATE TABLE one_time_pre_keys (
     FOREIGN KEY (user_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE
 );
 
-### Deployment Permissions (Post-May 2024 Fix)
-The Compute Engine default service account acts as the Cloud Build agent.
-- **Member:** `1078066473760-compute@developer.gserviceaccount.com`
-- **Required Roles:** - `roles/cloudbuild.builds.builder`
-  - `roles/storage.objectAdmin`
-  - `roles/logging.logWriter`
-  

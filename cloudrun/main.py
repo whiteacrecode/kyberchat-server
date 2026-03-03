@@ -1,64 +1,22 @@
 import os
 import logging
 from flask import Flask, request, jsonify
-from sqlalchemy import create_engine, text
-from sqlalchemy.engine import URL
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
-from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHashError
+
+from db import engine, ph
+from auth import issue_token
+from friends import friends_bp
 
 # Initialize Flask app
 app = Flask(__name__)
+app.register_blueprint(friends_bp)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Argon2id hasher — OWASP-recommended parameters.
-# The resulting hash is one-way and cannot be recovered by the user or service owner.
-# time_cost=3 iterations, memory_cost=65536 KB (64 MB), parallelism=4 threads
-ph = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
-
-# --- Database Configuration ---
-DB_USER = os.environ.get('DB_USER')
-DB_PASS = os.environ.get('DB_PASS')
-DB_NAME = os.environ.get('DB_NAME')
-DB_HOST = os.environ.get('DB_HOST')
-
-def get_db_url():
-    """
-    Constructs the SQLAlchemy URL.
-    Handles Unix Sockets for Cloud Run and TCP for local development.
-    """
-    if DB_HOST and DB_HOST.startswith('/'):
-        # Unix Socket (Google Cloud Run)
-        return URL.create(
-            drivername="mysql+pymysql",
-            username=DB_USER,
-            password=DB_PASS,
-            database=DB_NAME,
-            query={"unix_socket": DB_HOST}
-        )
-    else:
-        # TCP Connection (Local Dev / External IP)
-        return URL.create(
-            drivername="mysql+pymysql",
-            username=DB_USER,
-            password=DB_PASS,
-            host=DB_HOST or "127.0.0.1",
-            database=DB_NAME
-        )
-
-# Create SQLAlchemy engine
-# pool_pre_ping=True checks if the connection is alive before using it
-engine = create_engine(
-    get_db_url(),
-    pool_size=5,
-    max_overflow=2,
-    pool_timeout=30,
-    pool_recycle=1800,
-    pool_pre_ping=True
-)
 
 @app.route('/create_user', methods=['POST'])
 def create_user():
@@ -161,8 +119,9 @@ def validate_login():
             'registration_id': result[2],
             'created_at': result[3].isoformat() if result[3] else None
         }
+        token = issue_token(result[0])
         logger.info(f"Login validated for: {username}")
-        return jsonify({'message': 'User found', 'user': user_data}), 200
+        return jsonify({'message': 'User found', 'user': user_data, 'token': token}), 200
 
     except Exception as e:
         logger.error(f"Error validating login: {e}")
@@ -289,6 +248,7 @@ def change_password():
     except Exception as e:
         logger.error(f"Error changing password: {e}")
         return jsonify({'error': 'Internal server error'}), 500
+
 
 if __name__ == "__main__":
     # Cloud Run provides the PORT environment variable
