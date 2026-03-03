@@ -51,3 +51,5 @@ CREATE TABLE one_time_pre_keys (
     FOREIGN KEY (user_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE
 );
 
+the cloudrun endpoint url is https://quantchat-server-1078066473760.us-central1.run.app
+

@@ -7,6 +7,7 @@ from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHas
 
 from db import engine, ph
 from auth import issue_token
+from cache import set_heartbeat
 from friends import friends_bp
 
 # Initialize Flask app
@@ -150,6 +151,9 @@ def update_auth():
 
             if result.rowcount == 0:
                 return jsonify({'error': 'User not found'}), 404
+
+        # Also refresh the Redis heartbeat so online-status checks are real-time
+        set_heartbeat(user_uuid)
 
         logger.info(f"Auth updated (last_seen) for: {user_uuid}")
         return jsonify({'message': 'Auth updated successfully'}), 200
