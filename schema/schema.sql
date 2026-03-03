@@ -54,3 +54,21 @@ CREATE TABLE user_devices (
     FOREIGN KEY (user_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE
 );
 
+-- 5. Friends Table
+-- Tracks friendship relationships between users.
+-- A row exists for each directional request: requester -> addressee.
+-- status='accepted' means mutual friendship (both sides use this single row).
+CREATE TABLE friends (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    requester_uuid CHAR(36) NOT NULL,   -- user who sent the friend request
+    addressee_uuid CHAR(36) NOT NULL,   -- user who received the friend request
+    status ENUM('pending', 'accepted', 'blocked') NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (requester_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE,
+    FOREIGN KEY (addressee_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE,
+    UNIQUE KEY unique_friendship (requester_uuid, addressee_uuid),
+    INDEX (requester_uuid, status),
+    INDEX (addressee_uuid, status)
+);
+

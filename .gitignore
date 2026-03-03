@@ -205,3 +205,58 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ----------------------------
+# Emacs temporary & backup files
+# ----------------------------
+
+# Backup files
+*~
+\#*\#
+
+# Auto-save files
+.#*
+#*#
+
+# Lock files
+.#*
+
+# Compiled Emacs Lisp
+*.elc
+
+# Org-mode export files
+*.org~
+*.org_archive
+
+# Tramp files
+/tramp
+
+# Eshell history
+/eshell/history
+
+# Projectile cache
+.projectile
+
+# LSP mode
+.lsp-session-v1
+
+# Eglot
+.eglot
+
+# Company mode statistics
+.company-statistics-cache.el
+
+# Flycheck
+.flycheck_*
+
+# Session files
+.session
+.session.*
+
+# Desktop save files
+.emacs.desktop
+.emacs.desktop.lock
+
+# Directory local variables (if you don’t want them shared)
+.dir-locals-2.el
+
