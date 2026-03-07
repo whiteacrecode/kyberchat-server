@@ -219,3 +219,79 @@ def accept_friend_request():
     except Exception as e:
         logger.error(f"Error accepting friend request: {e}")
         return jsonify({'error': 'Internal server error'}), 500
+
+
+@friends_bp.route('/friends/accept_preview', methods=['POST'])
+def accept_preview():
+    """
+    Accepts a connection request that was delivered via FCM to a private-account
+    user (see POST /search_user). No 'pending' row exists yet — this endpoint
+    creates the friendship directly as 'accepted'.
+
+    Authentication: Bearer JWT (must be the private-account user / target).
+
+    Steps:
+      1. Verify both users are active.
+      2. Guard against a pre-existing relationship.
+      3. Insert friends row with status='accepted'.
+      4. Notify the original requester that the connection was accepted.
+
+    Request body: { "requester_uuid": "..." }
+    Headers:      Authorization: Bearer <token>
+    """
+    try:
+        accepter_uuid, err = verify_token(request)
+        if err:
+            return jsonify(err[0]), err[1]
+
+        data = request.get_json()
+        if not data or 'requester_uuid' not in data:
+            return jsonify({'error': 'Missing requester_uuid'}), 400
+
+        requester_uuid = data['requester_uuid']
+
+        if requester_uuid == accepter_uuid:
+            return jsonify({'error': 'Cannot accept a request from yourself'}), 400
+
+        with engine.begin() as conn:
+            # 1. Verify requester exists and is active
+            requester = conn.execute(
+                text("SELECT user_uuid FROM users WHERE user_uuid = :u AND deleted = 0"),
+                {'u': requester_uuid}
+            ).fetchone()
+
+            if not requester:
+                return jsonify({'error': 'Requester not found'}), 404
+
+            # 2. Guard against existing relationship
+            existing = conn.execute(text("""
+                SELECT status FROM friends
+                WHERE (requester_uuid = :a AND addressee_uuid = :b)
+                   OR (requester_uuid = :b AND addressee_uuid = :a)
+            """), {'a': requester_uuid, 'b': accepter_uuid}).fetchone()
+
+            if existing:
+                return jsonify({'status': existing[0]}), 200
+
+            # 3. Insert as accepted directly (no pending phase for private accounts)
+            conn.execute(text("""
+                INSERT INTO friends (requester_uuid, addressee_uuid, status)
+                VALUES (:requester, :accepter, 'accepted')
+            """), {'requester': requester_uuid, 'accepter': accepter_uuid})
+
+            # Fetch requester's push token to notify them
+            device = conn.execute(text("""
+                SELECT push_token FROM user_devices
+                WHERE user_uuid = :u
+                ORDER BY created_at DESC LIMIT 1
+            """), {'u': requester_uuid}).fetchone()
+
+        push_token = device[0] if device else None
+        notify_request_accepted(push_token)
+
+        logger.info(f"Connection accepted (preview): {requester_uuid} ← {accepter_uuid}")
+        return jsonify({'status': 'accepted'}), 200
+
+    except Exception as e:
+        logger.error(f"Error in accept_preview: {e}")
+        return jsonify({'error': 'Internal server error'}), 500

@@ -11,7 +11,8 @@ CREATE TABLE users (
     -- Argon2id hash (time_cost=3, memory_cost=65536, parallelism=4).
     -- One-way: irrecoverable by users or service operators.
     password_hash VARCHAR(255) NOT NULL,
-    deleted INT NOT NULL DEFAULT 0, -- 0 = active, 1 = soft-deleted
+    private INT NOT NULL DEFAULT 0,  -- 0 = public (discoverable), 1 = private
+    deleted INT NOT NULL DEFAULT 0,  -- 0 = active, 1 = soft-deleted
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
