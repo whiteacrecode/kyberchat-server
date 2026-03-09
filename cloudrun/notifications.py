@@ -62,6 +62,28 @@ def notify_friend_request(push_token: str | None, target_is_online: bool) -> Non
     _send(msg)
 
 
+def notify_new_message(push_token: str | None) -> None:
+    """
+    Notifies the recipient of a new incoming message.
+    Always a silent high-priority data message — the app fetches and decrypts
+    the payload itself. No sender identity or content is included.
+    """
+    if not push_token:
+        return
+
+    _send(messaging.Message(
+        data={'type': 'NEW_MESSAGE'},
+        token=push_token,
+        android=messaging.AndroidConfig(priority='high'),
+        apns=messaging.APNSConfig(
+            headers={'apns-priority': '10'},
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(content_available=True)
+            )
+        )
+    ))
+
+
 def notify_request_accepted(push_token: str | None) -> None:
     """
     Notifies the original requester that their invitation was accepted.

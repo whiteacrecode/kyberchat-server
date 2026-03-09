@@ -10,11 +10,13 @@ from auth import issue_token
 from cache import set_heartbeat
 from friends import friends_bp
 from e2e import e2e_bp
+from messages import messages_bp
 
 # Initialize Flask app
 app = Flask(__name__)
 app.register_blueprint(friends_bp)
 app.register_blueprint(e2e_bp)
+app.register_blueprint(messages_bp)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
