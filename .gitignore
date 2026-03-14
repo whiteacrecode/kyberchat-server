@@ -9,6 +9,7 @@ __pycache__/
 # it has passwords
 deploy.sh
 
+CLAUDE.md 
 
 # Distribution / packaging
 .Python

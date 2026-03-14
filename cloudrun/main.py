@@ -6,12 +6,14 @@ from sqlalchemy.exc import IntegrityError
 from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHashError
 
 from db import engine, ph
-from auth import issue_token
+from auth import issue_token, verify_token
 from cache import set_heartbeat
 from friends import friends_bp
 from e2e import e2e_bp
 from search import search_bp
 from messages import messages_bp
+from devices import devices_bp
+from firebase import firebase_bp
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -19,6 +21,8 @@ app.register_blueprint(friends_bp)
 app.register_blueprint(e2e_bp)
 app.register_blueprint(search_bp)
 app.register_blueprint(messages_bp)
+app.register_blueprint(devices_bp)
+app.register_blueprint(firebase_bp)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -45,25 +49,35 @@ def create_user():
         password = data['password']
 
         try:
-            # Assuming the client sends a hex string
             identity_key_public = bytes.fromhex(data['identity_key_public'])
         except ValueError:
             return jsonify({'error': 'identity_key_public must be a valid hex string'}), 400
+
+        # ML-KEM-768 public key (1184 bytes) — optional during rollout, required once all clients updated
+        kem_public_key: bytes | None = None
+        if 'kem_public_key' in data:
+            try:
+                kem_public_key = bytes.fromhex(data['kem_public_key'])
+                if len(kem_public_key) != 1184:
+                    return jsonify({'error': 'kem_public_key must be 1184 bytes (ML-KEM-768)'}), 400
+            except ValueError:
+                return jsonify({'error': 'kem_public_key must be a valid hex string'}), 400
 
         registration_id = data['registration_id']
         password_hash = ph.hash(password)
 
         with engine.connect() as connection:
             query = text("""
-                INSERT INTO users (user_uuid, username, identity_key_public, registration_id, password_hash)
-                VALUES (:user_uuid, :username, :identity_key_public, :registration_id, :password_hash)
+                INSERT INTO users (user_uuid, username, identity_key_public, registration_id, password_hash, kem_public_key)
+                VALUES (:user_uuid, :username, :identity_key_public, :registration_id, :password_hash, :kem_public_key)
             """)
             connection.execute(query, {
                 'user_uuid': user_uuid,
                 'username': username,
                 'identity_key_public': identity_key_public,
                 'registration_id': registration_id,
-                'password_hash': password_hash
+                'password_hash': password_hash,
+                'kem_public_key': kem_public_key,
             })
             connection.commit()
 
@@ -138,14 +152,13 @@ def validate_login():
 @app.route('/update_auth', methods=['POST'])
 def update_auth():
     """
-    Updates last_seen for a user.
+    Updates last_seen for the authenticated user and refreshes their Redis heartbeat.
+    Authentication: Bearer PASETO token (user_uuid is derived from token, not body).
     """
     try:
-        data = request.get_json()
-        if not data or 'user_uuid' not in data:
-            return jsonify({'error': 'Missing user_uuid'}), 400
-
-        user_uuid = data['user_uuid']
+        user_uuid, err = verify_token(request)
+        if err:
+            return jsonify(err[0]), err[1]
 
         with engine.connect() as connection:
             query = text("""
@@ -173,14 +186,17 @@ def update_auth():
 def delete_user():
     """
     Soft-deletes a user by setting deleted = 1.
-    Requires the user's password to confirm the action.
+    Authentication: Bearer PASETO token (defense-in-depth: also requires password).
     """
     try:
-        data = request.get_json()
-        if not data or 'user_uuid' not in data or 'password' not in data:
-            return jsonify({'error': 'Missing user_uuid or password'}), 400
+        user_uuid, err = verify_token(request)
+        if err:
+            return jsonify(err[0]), err[1]
 
-        user_uuid = data['user_uuid']
+        data = request.get_json()
+        if not data or 'password' not in data:
+            return jsonify({'error': 'Missing password'}), 400
+
         password = data['password']
 
         with engine.connect() as connection:
@@ -214,20 +230,23 @@ def delete_user():
 @app.route('/change_password', methods=['POST'])
 def change_password():
     """
-    Changes a user's password. Requires the current password to be correct
-    before the new password is accepted.
+    Changes a user's password.
+    Authentication: Bearer PASETO token (defense-in-depth: also requires old_password).
     """
     try:
+        user_uuid, err = verify_token(request)
+        if err:
+            return jsonify(err[0]), err[1]
+
         data = request.get_json()
         if not data:
             return jsonify({'error': 'Invalid JSON'}), 400
 
-        required_fields = ['user_uuid', 'old_password', 'new_password']
+        required_fields = ['old_password', 'new_password']
         for field in required_fields:
             if field not in data:
                 return jsonify({'error': f'Missing field: {field}'}), 400
 
-        user_uuid = data['user_uuid']
         old_password = data['old_password']
         new_password = data['new_password']
 

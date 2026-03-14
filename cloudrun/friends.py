@@ -145,7 +145,7 @@ def send_friend_request():
             device = conn.execute(text("""
                 SELECT push_token FROM user_devices
                 WHERE user_uuid = :u
-                ORDER BY created_at DESC LIMIT 1
+                ORDER BY updated_at DESC LIMIT 1
             """), {'u': addressee_uuid}).fetchone()
 
         # 4. Poke the addressee outside the DB transaction
@@ -207,7 +207,7 @@ def accept_friend_request():
             device = conn.execute(text("""
                 SELECT push_token FROM user_devices
                 WHERE user_uuid = :u
-                ORDER BY created_at DESC LIMIT 1
+                ORDER BY updated_at DESC LIMIT 1
             """), {'u': requester_uuid}).fetchone()
 
         push_token = device[0] if device else None
@@ -283,7 +283,7 @@ def accept_preview():
             device = conn.execute(text("""
                 SELECT push_token FROM user_devices
                 WHERE user_uuid = :u
-                ORDER BY created_at DESC LIMIT 1
+                ORDER BY updated_at DESC LIMIT 1
             """), {'u': requester_uuid}).fetchone()
 
         push_token = device[0] if device else None
@@ -294,4 +294,59 @@ def accept_preview():
 
     except Exception as e:
         logger.error(f"Error in accept_preview: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+@friends_bp.route('/friends/remove', methods=['POST'])
+def remove_friend():
+    """
+    Removes an accepted friendship between the authenticated user and a target.
+
+    Deletes the row from the friends table in both directions. After removal,
+    neither party can send messages to each other until a new friend request
+    is accepted.
+
+    Authentication: Bearer PASETO token.
+
+    Request body:
+      { "friend_uuid": "<uuid of the friend to remove>" }
+
+    Returns:
+      200 { "message": "Friend removed" }
+      400 { "error": "Cannot remove yourself" }
+      404 { "error": "Friendship not found" }
+    """
+    try:
+        user_uuid, err = verify_token(request)
+        if err:
+            return jsonify(err[0]), err[1]
+
+        data = request.get_json()
+        if not data or 'friend_uuid' not in data:
+            return jsonify({'error': 'Missing friend_uuid'}), 400
+
+        friend_uuid = data['friend_uuid']
+
+        if friend_uuid == user_uuid:
+            return jsonify({'error': 'Cannot remove yourself'}), 400
+
+        with engine.begin() as conn:
+            result = conn.execute(text("""
+                DELETE FROM friends
+                WHERE status = 'accepted'
+                  AND (
+                    (requester_uuid = :u AND addressee_uuid = :f)
+                    OR
+                    (requester_uuid = :f AND addressee_uuid = :u)
+                  )
+            """), {'u': user_uuid, 'f': friend_uuid})
+
+        if result.rowcount == 0:
+            return jsonify({'error': 'Friendship not found'}), 404
+
+        logger.info(f"Friendship removed: {user_uuid} ↔ {friend_uuid}")
+        return jsonify({'message': 'Friend removed'}), 200
+
+    except Exception as e:
+        logger.error(f"Error removing friend: {e}")
         return jsonify({'error': 'Internal server error'}), 500
