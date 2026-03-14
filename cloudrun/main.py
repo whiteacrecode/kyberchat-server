@@ -65,8 +65,9 @@ def create_user():
             })
             connection.commit()
 
+        token = issue_token(user_uuid)
         logger.info(f"User created: {username} ({user_uuid})")
-        return jsonify({'message': 'User created successfully', 'user_uuid': user_uuid}), 201
+        return jsonify({'message': 'User created successfully', 'user_uuid': user_uuid, 'token': token}), 201
 
     except IntegrityError as e:
         logger.warning(f"IntegrityError: {e}")
