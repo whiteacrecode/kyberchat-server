@@ -10,12 +10,14 @@ from auth import issue_token
 from cache import set_heartbeat
 from friends import friends_bp
 from e2e import e2e_bp
+from search import search_bp
 from messages import messages_bp
 
 # Initialize Flask app
 app = Flask(__name__)
 app.register_blueprint(friends_bp)
 app.register_blueprint(e2e_bp)
+app.register_blueprint(search_bp)
 app.register_blueprint(messages_bp)
 
 # Configure logging
@@ -65,8 +67,9 @@ def create_user():
             })
             connection.commit()
 
+        token = issue_token(user_uuid)
         logger.info(f"User created: {username} ({user_uuid})")
-        return jsonify({'message': 'User created successfully', 'user_uuid': user_uuid}), 201
+        return jsonify({'message': 'User created successfully', 'user_uuid': user_uuid, 'token': token}), 201
 
     except IntegrityError as e:
         logger.warning(f"IntegrityError: {e}")

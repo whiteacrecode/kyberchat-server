@@ -61,7 +61,7 @@ def notify_friend_request(push_token: str | None, target_is_online: bool) -> Non
 
     _send(msg)
 
-
+    
 def notify_new_message(push_token: str | None) -> None:
     """
     Notifies the recipient of a new incoming message.
@@ -71,6 +71,31 @@ def notify_new_message(push_token: str | None) -> None:
     if not push_token:
         return
 
+    data = {'type': 'CONNECTION_REQUEST', 'requester_uuid': requester_uuid}
+
+    if target_is_online:
+        msg = messaging.Message(
+            data=data,
+            token=push_token,
+            android=messaging.AndroidConfig(priority='high'),
+            apns=messaging.APNSConfig(
+                headers={'apns-priority': '10'},
+                payload=messaging.APNSPayload(
+                    aps=messaging.Aps(content_available=True)
+                )
+            )
+        )
+    else:
+        msg = messaging.Message(
+            notification=messaging.Notification(
+                title='New Connection Request',
+                body='Someone wants to connect with you.'
+            ),
+            data=data,
+            token=push_token,
+        )
+
+    _send(msg)
     _send(messaging.Message(
         data={'type': 'NEW_MESSAGE'},
         token=push_token,
