@@ -61,16 +61,12 @@ def notify_friend_request(push_token: str | None, target_is_online: bool) -> Non
 
     _send(msg)
 
-
-def notify_connection_request(push_token: str | None, requester_uuid: str, target_is_online: bool) -> None:
+    
+def notify_new_message(push_token: str | None) -> None:
     """
-    Notifies a private-account user that someone wants to connect with them.
-
-    Includes requester_uuid in the data payload so the client can present
-    an Accept/Decline UI identifying the sender.
-
-    Online  → silent high-priority data message.
-    Offline → push notification with a generic banner.
+    Notifies the recipient of a new incoming message.
+    Always a silent high-priority data message — the app fetches and decrypts
+    the payload itself. No sender identity or content is included.
     """
     if not push_token:
         return
@@ -100,6 +96,17 @@ def notify_connection_request(push_token: str | None, requester_uuid: str, targe
         )
 
     _send(msg)
+    _send(messaging.Message(
+        data={'type': 'NEW_MESSAGE'},
+        token=push_token,
+        android=messaging.AndroidConfig(priority='high'),
+        apns=messaging.APNSConfig(
+            headers={'apns-priority': '10'},
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(content_available=True)
+            )
+        )
+    ))
 
 
 def notify_request_accepted(push_token: str | None) -> None:
