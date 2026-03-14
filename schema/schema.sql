@@ -4,13 +4,16 @@ USE e2e_chat_service;
 -- 1. Users Table
 -- Stores basic identity. No PII (Email/Phone) as per requirements.
 CREATE TABLE users (
-    user_uuid CHAR(36) PRIMARY KEY, -- Generated on client or server
+    user_uuid CHAR(36) PRIMARY KEY, -- Generated deterministically on client from BIP39 mnemonic seed
     username VARCHAR(50) UNIQUE NOT NULL, -- Human readable ID
-    identity_key_public BLOB NOT NULL, -- Long-term Identity Public Key (IK)
+    identity_key_public BLOB NOT NULL, -- Long-term X25519 Identity Public Key (IK), 32 bytes
     registration_id INT NOT NULL, -- Signal-specific ID for the device
     -- Argon2id hash (time_cost=3, memory_cost=65536, parallelism=4).
     -- One-way: irrecoverable by users or service operators.
     password_hash VARCHAR(255) NOT NULL,
+    -- ML-KEM-768 post-quantum public key (1184 bytes). NULL for pre-PQC accounts.
+    -- Populated on registration by clients with swift-crypto 3.3+ installed.
+    kem_public_key BLOB NULL,
     private INT NOT NULL DEFAULT 0,  -- 0 = public (discoverable), 1 = private
     deleted INT NOT NULL DEFAULT 0,  -- 0 = active, 1 = soft-deleted
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -44,15 +47,22 @@ CREATE TABLE one_time_pre_keys (
     INDEX (user_uuid, is_consumed)
 );
 
--- 4. Devices/Sessions Table (Optional but Recommended)
--- Tracks which devices a user has registered (e.g., iPhone vs Android).
+-- 4. Devices/Sessions Table
+-- Tracks FCM push tokens per user. Supports multiple devices (multi-device).
+-- Notifications are always sent to the token with the most recent updated_at.
 CREATE TABLE user_devices (
     device_id INT AUTO_INCREMENT PRIMARY KEY,
     user_uuid CHAR(36) NOT NULL,
-    push_token VARCHAR(255), -- For FCM (Android) or APNs (iOS)
-    platform ENUM('ios', 'android') NOT NULL,
+    push_token VARCHAR(255) NOT NULL,           -- FCM registration token
+    platform ENUM('ios', 'android') NULL,       -- NULL until client sends platform field
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE
+    updated_at TIMESTAMP NOT NULL               -- Last token refresh / heartbeat
+        DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE,
+    -- Prevent duplicate (user, token) rows that can accumulate from repeated registrations
+    UNIQUE KEY unique_user_token (user_uuid, push_token),
+    INDEX (user_uuid)
 );
 
 -- 5. Friends Table

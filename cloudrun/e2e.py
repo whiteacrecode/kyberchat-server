@@ -350,7 +350,7 @@ def get_key_bundle(target_uuid: str):
         with engine.begin() as conn:
             user = conn.execute(
                 text("""
-                    SELECT user_uuid, identity_key_public, registration_id
+                    SELECT user_uuid, identity_key_public, registration_id, kem_public_key
                     FROM users WHERE user_uuid = :u AND deleted = 0
                 """),
                 {"u": target_uuid},
@@ -400,6 +400,8 @@ def get_key_bundle(target_uuid: str):
             "user_uuid":           user[0],
             "identity_key_public": bytes(user[1]).hex(),
             "registration_id":     user[2],
+            # ML-KEM-768 public key — present if recipient has registered a KEM key (v1 PQC)
+            "kem_public_key":      bytes(user[3]).hex() if user[3] else None,
             "signed_pre_key": {
                 "key_id":    spk[0],
                 "public_key": bytes(spk[1]).hex(),

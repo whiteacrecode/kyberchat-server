@@ -72,7 +72,7 @@ def send_message():
                 FROM users u
                 LEFT JOIN user_devices d ON d.user_uuid = u.user_uuid
                 WHERE u.user_uuid = :uuid AND u.deleted = 0
-                ORDER BY d.created_at DESC
+                ORDER BY d.updated_at DESC
                 LIMIT 1
             """), {'uuid': recipient_uuid}).fetchone()
 
@@ -157,4 +157,118 @@ def get_messages():
 
     except Exception as e:
         logger.error(f"Error fetching messages: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+@messages_bp.route('/messages/<message_id>', methods=['DELETE'])
+def delete_message(message_id: str):
+    """
+    Deletes a single message from Firestore after the client has decrypted it.
+
+    Only the intended recipient may delete a message — the server verifies
+    ownership before deletion. This enforces forward-privacy: once decrypted
+    and acknowledged, the ciphertext is gone from the server.
+
+    Authentication: Bearer PASETO token.
+
+    URL parameter: message_id (UUID)
+
+    Returns:
+      200 { "message": "Message deleted" }
+      403 { "error": "Forbidden" }         — message belongs to someone else
+      404 { "error": "Message not found" } — already deleted or bad ID
+    """
+    try:
+        user_uuid, err = verify_token(request)
+        if err:
+            return jsonify(err[0]), err[1]
+
+        db = firestore.client()
+        doc_ref = db.collection('messages').document(message_id)
+        doc = doc_ref.get()
+
+        if not doc.exists:
+            return jsonify({'error': 'Message not found'}), 404
+
+        data = doc.to_dict()
+
+        # Only the recipient may delete — prevent senders from erasing evidence
+        if data.get('recipient_uuid') != user_uuid:
+            return jsonify({'error': 'Forbidden'}), 403
+
+        doc_ref.delete()
+
+        logger.info(f"Message deleted: {message_id} by recipient {user_uuid}")
+        return jsonify({'message': 'Message deleted'}), 200
+
+    except Exception as e:
+        logger.error(f"Error deleting message {message_id}: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+@messages_bp.route('/messages/ack', methods=['POST'])
+def ack_messages():
+    """
+    Batch-deletes multiple messages after the client confirms decryption.
+
+    More efficient than calling DELETE /messages/<id> in a loop after
+    receiving a batch from GET /messages.
+
+    Authentication: Bearer PASETO token.
+
+    Request body:
+      { "message_ids": ["<uuid>", "<uuid>", ...] }
+
+    Returns:
+      200 { "deleted": 3, "not_found": 0, "forbidden": 0 }
+    """
+    try:
+        user_uuid, err = verify_token(request)
+        if err:
+            return jsonify(err[0]), err[1]
+
+        data = request.get_json()
+        if not data or 'message_ids' not in data:
+            return jsonify({'error': 'Missing message_ids'}), 400
+
+        message_ids = data['message_ids']
+        if not isinstance(message_ids, list) or not message_ids:
+            return jsonify({'error': 'message_ids must be a non-empty list'}), 400
+
+        db = firestore.client()
+        deleted = not_found = forbidden = 0
+
+        # Firestore batch delete — max 500 ops per batch
+        batch = db.batch()
+        batch_count = 0
+
+        for mid in message_ids:
+            doc_ref = db.collection('messages').document(str(mid))
+            doc = doc_ref.get()
+
+            if not doc.exists:
+                not_found += 1
+                continue
+
+            if doc.to_dict().get('recipient_uuid') != user_uuid:
+                forbidden += 1
+                continue
+
+            batch.delete(doc_ref)
+            deleted += 1
+            batch_count += 1
+
+            if batch_count == 500:
+                batch.commit()
+                batch = db.batch()
+                batch_count = 0
+
+        if batch_count > 0:
+            batch.commit()
+
+        logger.info(f"Batch ack for {user_uuid}: deleted={deleted}, not_found={not_found}, forbidden={forbidden}")
+        return jsonify({'deleted': deleted, 'not_found': not_found, 'forbidden': forbidden}), 200
+
+    except Exception as e:
+        logger.error(f"Error in ack_messages: {e}")
         return jsonify({'error': 'Internal server error'}), 500
