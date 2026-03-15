@@ -85,6 +85,43 @@ def notify_new_message(push_token: str | None) -> None:
     ))
 
 
+def notify_connection_request(push_token: str | None, requester_uuid: str, target_is_online: bool) -> None:
+    """
+    Notifies a private-account user that someone wants to connect with them.
+    Includes the requester_uuid so the recipient can Accept or Decline via
+    POST /friends/accept_preview.
+
+    Online  → silent high-priority data message.
+    Offline → standard push notification with a generic title.
+    """
+    if not push_token:
+        return
+
+    if target_is_online:
+        msg = messaging.Message(
+            data={'type': 'CONNECTION_REQUEST', 'requester_uuid': requester_uuid},
+            token=push_token,
+            android=messaging.AndroidConfig(priority='high'),
+            apns=messaging.APNSConfig(
+                headers={'apns-priority': '10'},
+                payload=messaging.APNSPayload(
+                    aps=messaging.Aps(content_available=True)
+                )
+            )
+        )
+    else:
+        msg = messaging.Message(
+            notification=messaging.Notification(
+                title='New Connection Request',
+                body='Someone wants to connect with you.'
+            ),
+            data={'type': 'CONNECTION_REQUEST', 'requester_uuid': requester_uuid},
+            token=push_token,
+        )
+
+    _send(msg)
+
+
 def notify_request_accepted(push_token: str | None) -> None:
     """
     Notifies the original requester that their invitation was accepted.

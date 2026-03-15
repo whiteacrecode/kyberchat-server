@@ -11,6 +11,45 @@ search_bp = Blueprint('search', __name__)
 logger = logging.getLogger(__name__)
 
 
+@search_bp.route('/user/lookup', methods=['POST'])
+def lookup_user():
+    """
+    Resolves a username to a UUID. Requires auth but has no rate limit.
+    Intended for internal flows (e.g. accepting a known friend request)
+    rather than user discovery.
+
+    Request body: { "username": "target_username" }
+    Headers:      Authorization: Bearer <token>
+
+    Returns:
+      200 { "user_uuid": "...", "username": "..." }
+      404 { "error": "User not found" }
+    """
+    try:
+        _, err = verify_token(request)
+        if err:
+            return jsonify(err[0]), err[1]
+
+        data = request.get_json()
+        if not data or 'username' not in data:
+            return jsonify({'error': 'Missing username'}), 400
+
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT user_uuid, username FROM users WHERE username = :u AND deleted = 0"),
+                {'u': data['username']}
+            ).fetchone()
+
+        if not row:
+            return jsonify({'error': 'User not found'}), 404
+
+        return jsonify({'user_uuid': row[0], 'username': row[1]}), 200
+
+    except Exception as e:
+        logger.error(f"Error in lookup_user: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
 @search_bp.route('/search_user', methods=['POST'])
 def search_user():
     """
@@ -77,7 +116,7 @@ def search_user():
             """), {'a': requester_uuid, 'b': target_uuid}).fetchone()
 
             if existing:
-                return jsonify({'status': existing[0]}), 200
+                return jsonify({'status': existing[0], 'user_uuid': target_uuid}), 200
 
             # 3. Fetch push token if we'll need to notify
             device = None
