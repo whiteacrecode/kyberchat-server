@@ -1,43 +1,24 @@
 #!/usr/bin/env python3
-"""Test script for the /create_user endpoint."""
+"""Login and print user details including UUID via POST /validate_login."""
 
 import argparse
 import json
 import sys
 import urllib.request
 import urllib.error
-import os
-import random
-import uuid
 
 BASE_URL = "https://quantchat-server-1078066473760.us-central1.run.app"
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test the /create_user endpoint")
-    parser.add_argument("--user", required=True, help="Username to register")
-    parser.add_argument("--pass", dest="password", required=True, help="Password for the account")
+    parser = argparse.ArgumentParser(description="Login and retrieve user UUID")
+    parser.add_argument("--user", required=True, help="Username")
+    parser.add_argument("--pass", dest="password", required=True, help="Password")
     args = parser.parse_args()
 
-    url = f"{BASE_URL}/create_user"
-    user_uuid = str(uuid.uuid4())
-    identity_key_public = os.urandom(32).hex()   # 32-byte X25519 public key placeholder
-    registration_id = random.randint(1, 16380)   # Signal Protocol valid range
-
-    print(f"Generated UUID:            {user_uuid}")
-    print(f"Generated registration_id: {registration_id}")
-    print(f"Generated identity_key:    {identity_key_public}")
-
-    payload = json.dumps({
-        "user_uuid": user_uuid,
-        "username": args.user,
-        "password": args.password,
-        "identity_key_public": identity_key_public,
-        "registration_id": registration_id,
-    }).encode("utf-8")
-
+    payload = json.dumps({"username": args.user, "password": args.password}).encode("utf-8")
     req = urllib.request.Request(
-        url,
+        f"{BASE_URL}/validate_login",
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
