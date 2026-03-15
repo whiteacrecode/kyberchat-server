@@ -1,10 +1,8 @@
 import base64
 import logging
 import uuid as uuid_module
-from datetime import datetime, timezone
 
 from flask import Blueprint, request, jsonify
-from firebase_admin import firestore
 from sqlalchemy import text
 
 from auth import verify_token
@@ -20,7 +18,7 @@ CIPHERTEXT_SIZE = 1024  # bytes — fixed-size E2EE payload
 @messages_bp.route('/messages/send', methods=['POST'])
 def send_message():
     """
-    Stores a 1024-byte E2EE ciphertext in Firestore and notifies the recipient
+    Stores a 1024-byte E2EE ciphertext in MySQL and notifies the recipient
     via FCM.
 
     The server never sees plaintext — it relays opaque encrypted blobs only.
@@ -65,8 +63,8 @@ def send_message():
                 'error': f'ciphertext must be exactly {CIPHERTEXT_SIZE} bytes, got {len(raw)}'
             }), 400
 
-        # Verify recipient exists and fetch their push token in one query
-        with engine.connect() as conn:
+        with engine.begin() as conn:
+            # Verify recipient exists and fetch their push token
             row = conn.execute(text("""
                 SELECT u.user_uuid, d.push_token
                 FROM users u
@@ -76,24 +74,22 @@ def send_message():
                 LIMIT 1
             """), {'uuid': recipient_uuid}).fetchone()
 
-        if not row:
-            return jsonify({'error': 'Recipient not found'}), 404
+            if not row:
+                return jsonify({'error': 'Recipient not found'}), 404
 
-        push_token = row[1]
+            push_token = row[1]
 
-        # Persist the encrypted blob in Firestore
-        message_id = str(uuid_module.uuid4())
-        db = firestore.client()
-        db.collection('messages').document(message_id).set({
-            'message_id': message_id,
-            'sender_uuid': sender_uuid,
-            'recipient_uuid': recipient_uuid,
-            'ciphertext': data['ciphertext'],  # store as base64 string
-            'created_at': datetime.now(timezone.utc),
-            'delivered': False,
-        })
+            message_id = str(uuid_module.uuid4())
+            conn.execute(text("""
+                INSERT INTO messages (message_id, sender_uuid, recipient_uuid, ciphertext)
+                VALUES (:message_id, :sender, :recipient, :ciphertext)
+            """), {
+                'message_id': message_id,
+                'sender': sender_uuid,
+                'recipient': recipient_uuid,
+                'ciphertext': data['ciphertext'],
+            })
 
-        # Notify the recipient — silent data message to avoid metadata leaks
         notify_new_message(push_token)
 
         logger.info(f"Message stored: {sender_uuid} → {recipient_uuid} ({message_id})")
@@ -109,9 +105,6 @@ def get_messages():
     """
     Returns all messages addressed to the authenticated user, ordered by
     creation time (oldest first).
-
-    Clients should delete messages locally after decryption; this endpoint
-    returns everything still on the server.
 
     Authentication: Bearer JWT.
 
@@ -133,24 +126,23 @@ def get_messages():
         if err:
             return jsonify(err[0]), err[1]
 
-        db = firestore.client()
-        docs = (
-            db.collection('messages')
-            .where('recipient_uuid', '==', user_uuid)
-            .order_by('created_at')
-            .stream()
-        )
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT message_id, sender_uuid, ciphertext, created_at
+                FROM messages
+                WHERE recipient_uuid = :uuid
+                ORDER BY created_at ASC
+            """), {'uuid': user_uuid}).fetchall()
 
-        messages = []
-        for doc in docs:
-            d = doc.to_dict()
-            created_at = d.get('created_at')
-            messages.append({
-                'message_id': d.get('message_id'),
-                'sender_uuid': d.get('sender_uuid'),
-                'ciphertext': d.get('ciphertext'),
-                'created_at': created_at.isoformat() if created_at else None,
-            })
+        messages = [
+            {
+                'message_id': row[0],
+                'sender_uuid': row[1],
+                'ciphertext': row[2],
+                'created_at': row[3].isoformat() if row[3] else None,
+            }
+            for row in rows
+        ]
 
         logger.info(f"Returned {len(messages)} messages for user: {user_uuid}")
         return jsonify({'messages': messages}), 200
@@ -163,40 +155,33 @@ def get_messages():
 @messages_bp.route('/messages/<message_id>', methods=['DELETE'])
 def delete_message(message_id: str):
     """
-    Deletes a single message from Firestore after the client has decrypted it.
-
-    Only the intended recipient may delete a message — the server verifies
-    ownership before deletion. This enforces forward-privacy: once decrypted
-    and acknowledged, the ciphertext is gone from the server.
+    Deletes a single message after the client has decrypted it.
+    Only the intended recipient may delete a message.
 
     Authentication: Bearer PASETO token.
 
-    URL parameter: message_id (UUID)
-
     Returns:
       200 { "message": "Message deleted" }
-      403 { "error": "Forbidden" }         — message belongs to someone else
-      404 { "error": "Message not found" } — already deleted or bad ID
+      403 { "error": "Forbidden" }
+      404 { "error": "Message not found" }
     """
     try:
         user_uuid, err = verify_token(request)
         if err:
             return jsonify(err[0]), err[1]
 
-        db = firestore.client()
-        doc_ref = db.collection('messages').document(message_id)
-        doc = doc_ref.get()
+        with engine.begin() as conn:
+            row = conn.execute(text("""
+                SELECT recipient_uuid FROM messages WHERE message_id = :id
+            """), {'id': message_id}).fetchone()
 
-        if not doc.exists:
-            return jsonify({'error': 'Message not found'}), 404
+            if not row:
+                return jsonify({'error': 'Message not found'}), 404
 
-        data = doc.to_dict()
+            if row[0] != user_uuid:
+                return jsonify({'error': 'Forbidden'}), 403
 
-        # Only the recipient may delete — prevent senders from erasing evidence
-        if data.get('recipient_uuid') != user_uuid:
-            return jsonify({'error': 'Forbidden'}), 403
-
-        doc_ref.delete()
+            conn.execute(text("DELETE FROM messages WHERE message_id = :id"), {'id': message_id})
 
         logger.info(f"Message deleted: {message_id} by recipient {user_uuid}")
         return jsonify({'message': 'Message deleted'}), 200
@@ -209,10 +194,7 @@ def delete_message(message_id: str):
 @messages_bp.route('/messages/ack', methods=['POST'])
 def ack_messages():
     """
-    Batch-deletes multiple messages after the client confirms decryption.
-
-    More efficient than calling DELETE /messages/<id> in a loop after
-    receiving a batch from GET /messages.
+    Batch-deletes messages after the client confirms decryption.
 
     Authentication: Bearer PASETO token.
 
@@ -235,36 +217,27 @@ def ack_messages():
         if not isinstance(message_ids, list) or not message_ids:
             return jsonify({'error': 'message_ids must be a non-empty list'}), 400
 
-        db = firestore.client()
+        if len(message_ids) > 500:
+            return jsonify({'error': 'Maximum 500 message_ids per request'}), 400
+
         deleted = not_found = forbidden = 0
 
-        # Firestore batch delete — max 500 ops per batch
-        batch = db.batch()
-        batch_count = 0
+        with engine.begin() as conn:
+            for mid in message_ids:
+                row = conn.execute(text("""
+                    SELECT recipient_uuid FROM messages WHERE message_id = :id
+                """), {'id': str(mid)}).fetchone()
 
-        for mid in message_ids:
-            doc_ref = db.collection('messages').document(str(mid))
-            doc = doc_ref.get()
+                if not row:
+                    not_found += 1
+                    continue
 
-            if not doc.exists:
-                not_found += 1
-                continue
+                if row[0] != user_uuid:
+                    forbidden += 1
+                    continue
 
-            if doc.to_dict().get('recipient_uuid') != user_uuid:
-                forbidden += 1
-                continue
-
-            batch.delete(doc_ref)
-            deleted += 1
-            batch_count += 1
-
-            if batch_count == 500:
-                batch.commit()
-                batch = db.batch()
-                batch_count = 0
-
-        if batch_count > 0:
-            batch.commit()
+                conn.execute(text("DELETE FROM messages WHERE message_id = :id"), {'id': str(mid)})
+                deleted += 1
 
         logger.info(f"Batch ack for {user_uuid}: deleted={deleted}, not_found={not_found}, forbidden={forbidden}")
         return jsonify({'deleted': deleted, 'not_found': not_found, 'forbidden': forbidden}), 200
