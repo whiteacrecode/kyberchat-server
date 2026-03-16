@@ -1,3 +1,149 @@
+# KyberChat Server — Claude Context Guide
+
+> **Server directory:** `/Users/tom/Documents/work/kyberchat-server`
+> **iOS app directory:** `/Users/tom/Documents/work/kyberchat-ios`
+> **Last updated:** 2026-03-15
+
+---
+
+## GCP / Firebase Project
+
+| Setting | Value |
+|---------|-------|
+| GCP Project ID | `quantchat-server` |
+| Project Number | `1078066473760` |
+| Region | `us-central1` |
+| Cloud Run Service | `quantchat-server` |
+| Endpoint | `https://quantchat-server-1078066473760.us-central1.run.app` |
+| Database | MySQL / Cloud SQL (`quantchat-server:us-central1:quantchat`, db `e2e-chat-service`) |
+| Runtime | Python / Flask |
+| Deploy | `cd utils && bash deploy.sh` |
+
+### Firebase Setup Status
+Firebase has been added to the GCP project `quantchat-server`. Required setup steps:
+
+1. **Firebase project** — add Firebase to GCP project at console.firebase.google.com → "Add Firebase to a Google Cloud project" → select `quantchat-server`
+2. **iOS app registered** — download `GoogleService-Info.plist` → add to Xcode target
+3. **Firebase Authentication** — enable at Firebase console → Authentication → Get started (no sign-in providers needed; custom tokens work without them)
+4. **Firestore** — create at Firebase console → Firestore Database → us-central1 → Production mode; deploy rules from `kyberchat-ios/firestore.rules`
+5. **APNs key** — upload `.p8` key at Firebase console → Project Settings → Cloud Messaging → Apple app configuration
+6. **Service account key (local dev only)** — download from Firebase console → Project Settings → Service accounts → Generate new private key; save to `~/.config/gcloud/quantchat-firebase-sa.json`; set `GOOGLE_APPLICATION_CREDENTIALS` env var
+7. **Cloud Run SA IAM roles** — grant the Cloud Run runtime SA `roles/firebase.sdkAdminServiceAgent` and `roles/cloudmessaging.admin` (see gcloud commands below)
+8. **Enable APIs** — run gcloud commands below
+9. **Deploy server** — `cd utils && bash deploy.sh`
+
+### GOOGLE_APPLICATION_CREDENTIALS
+This env var is ONLY needed for **local development** on your Mac. On Cloud Run in production, the runtime service account's IAM roles handle authentication automatically — no JSON key file is needed.
+
+For local dev:
+```bash
+# Download the key from Firebase console → Project Settings → Service accounts → Generate new private key
+# Save it to: ~/.config/gcloud/quantchat-firebase-sa.json
+# Add to ~/.zshrc:
+export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/quantchat-firebase-sa.json"
+```
+
+### gcloud Setup Commands (run once, idempotent)
+
+```bash
+# Enable required APIs
+gcloud services enable \
+  firebase.googleapis.com \
+  firestore.googleapis.com \
+  fcm.googleapis.com \
+  firebaseauth.googleapis.com \
+  identitytoolkit.googleapis.com \
+  --project=quantchat-server
+
+# Find the Cloud Run service account
+SA=$(gcloud run services describe quantchat-server \
+  --region=us-central1 --project=quantchat-server \
+  --format='value(spec.template.spec.serviceAccountName)')
+# If SA is empty, use the Compute Engine default SA:
+# PROJECT_NUMBER=$(gcloud projects describe quantchat-server --format='value(projectNumber)')
+# SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+
+# Grant Firebase Admin role (required for create_custom_token)
+gcloud projects add-iam-policy-binding quantchat-server \
+  --member="serviceAccount:${SA}" \
+  --role="roles/firebase.sdkAdminServiceAgent"
+
+# Grant FCM Admin role (required for messaging.send)
+gcloud projects add-iam-policy-binding quantchat-server \
+  --member="serviceAccount:${SA}" \
+  --role="roles/cloudmessaging.admin"
+```
+
+### Deploy Firestore Rules
+
+```bash
+cd /Users/tom/Documents/work/kyberchat-ios
+firebase use quantchat-server
+firebase deploy --only firestore:rules --project quantchat-server
+```
+
+### Verify FCM is Working
+
+```bash
+TOKEN=$(curl -s -X POST \
+  https://quantchat-server-1078066473760.us-central1.run.app/validate_login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"YOUR_USER","password":"YOUR_PASS"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+curl -X POST \
+  https://quantchat-server-1078066473760.us-central1.run.app/firebase_token \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json'
+# Expected: {"firebase_token": "eyJ..."}
+# 503 means IAM roles not yet propagated — wait 2 min and retry
+```
+
+---
+
+## Server File Structure
+
+```
+cloudrun/
+  main.py          ← Flask app, all blueprints registered here
+  auth.py          ← PASETO auth decorator + login/create endpoints
+  firebase.py      ← Firebase Admin SDK init + /firebase_token + send_fcm_notification()
+  notifications.py ← FCM push helpers (notify_friend_request, notify_new_message, etc.)
+  devices.py       ← /register_device, /unregister_device
+  messages.py      ← /messages REST fallback (GET + POST + ack)
+  friends.py       ← /get_friends, /friends/request, /friends/accept, /friends/remove
+  db.py            ← SQLAlchemy engine, Cloud SQL (MySQL) connection
+  cache.py         ← Redis cache layer
+  e2e.py           ← server-side X3DH/DR helpers (for test/demo)
+  search.py        ← /search_user
+  requirements.txt
+  Dockerfile
+schema/
+  schema.sql       ← full DB schema
+  migrations/      ← incremental SQL migrations
+utils/
+  deploy.sh        ← Cloud Run deployment script
+  chat_demo.py     ← end-to-end crypto demo
+```
+
+### Key Design Points in firebase.py
+
+- `_get_app()` uses lazy init with `get_app()` fallback — safe whether `notifications.py` or `firebase.py` initialises Firebase first
+- `create_custom_token(user_uuid)` — called by `POST /firebase_token`; requires `roles/firebase.sdkAdminServiceAgent` on the Cloud Run SA
+- `send_fcm_notification(push_token, data_payload)` — silent data-only push; sets APNs `content-available:1` for iOS background wake; sets Android priority HIGH; requires `roles/cloudmessaging.admin`
+- `firebase_bp` Blueprint provides `POST /firebase_token` — registered in `main.py`
+
+### Key Design Points in notifications.py
+
+- Module-level init uses `get_app()` first to avoid double-init conflict with `firebase.py`
+- `notify_friend_request(push_token, is_online)` — sends FRIEND_REQUEST push
+- `notify_new_message(push_token)` — sends NEW_MESSAGE push
+- `notify_request_accepted(push_token)` — sends FRIEND_REQUEST_ACCEPTED push
+- `notify_connection_request(push_token, requester_uuid, is_online)` — sends CONNECTION_REQUEST push (private accounts)
+- All functions are no-ops if `push_token` is None
+
+---
+
 # Project: Privacy-First E2EE post quantum Chat App (Kotlin/Swift/GCP)
 
 Please read technical plan at https://docs.google.com/document/d/1ed1ZChYBov-3MVqU6XsdMiyLYhVLLbpnXMvtpuUOu9s/edit?usp=sharing
