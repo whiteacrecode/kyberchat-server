@@ -1,143 +1,213 @@
-"""
-firebase.py — Firebase custom token exchange (Option A)
+# cloudrun/firebase.py
+#
+# Firebase Admin SDK initialisation + two public helpers:
+#   create_custom_token(user_uuid)          — for POST /firebase_token
+#   send_fcm_notification(token, payload)   — for push notifications
+#
+# Auth strategy: Application Default Credentials (ADC).
+# On Cloud Run the runtime SA is used automatically — no key file needed
+# as long as the SA has roles/firebase.sdkAdminServiceAgent and
+# roles/cloudmessaging.admin (see gcloud commands at bottom of file).
+#
+# Local dev: set GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa-key.json
+# or run `gcloud auth application-default login`.
+#
+# Android + iOS both use the same FCM token type; send_fcm_notification
+# is platform-agnostic.  The APNs-specific headers are set for iOS so
+# silent pushes (content-available:1) work correctly; Android ignores them.
 
-Bridges KyberChat's PASETO session layer with Firebase Auth so that the iOS
-client can write directly to Firestore with proper security rule enforcement.
-
-Flow:
-  1. iOS calls POST /firebase_token with its PASETO Bearer token.
-  2. Server verifies the PASETO token and extracts user_uuid.
-  3. Server calls firebase_admin.auth.create_custom_token(user_uuid).
-     — Signed with the Cloud Run service account's private key via ADC.
-     — Expires after 1 hour (Firebase-mandated maximum).
-  4. iOS receives the custom token and calls Auth.auth().signIn(withCustomToken:).
-     — This gives Firebase a UID equal to the user's KyberChat user_uuid.
-     — The resulting Firebase session credential persists until it expires.
-  5. iOS uses that credential for all Firestore reads/writes.
-     — Firestore security rules check request.auth.uid against document fields.
-
-Firebase custom token expiry:
-  Custom tokens themselves expire after 1 hour, but the Firebase ID token obtained
-  from signIn(withCustomToken:) auto-refreshes (valid for ~1 hour, silently renewed
-  by the Firebase SDK). In practice the iOS client should only need to call this
-  endpoint on first login and after a complete sign-out. The SDK handles the rest.
-
-Required IAM permission on the Cloud Run service account:
-  roles/iam.serviceAccountTokenCreator
-  (or the finer-grained: iam.serviceAccounts.signBlob on the service account itself)
-
-  Without this, create_custom_token raises:
-    google.auth.exceptions.TransportError: ... compute-metadata ... signBlob
-  Grant it in the GCP console or via:
-    gcloud projects add-iam-policy-binding <PROJECT_ID> \\
-      --member="serviceAccount:<SA_EMAIL>" \\
-      --role="roles/iam.serviceAccountTokenCreator"
-"""
-
-import time
+import os
 import logging
 
 import firebase_admin
-from firebase_admin import auth as firebase_auth
-from flask import Blueprint, request, jsonify
+from firebase_admin import auth as firebase_auth, credentials, messaging
+from flask import Blueprint, jsonify, request
 
-from auth import verify_token
-
-firebase_bp = Blueprint('firebase', __name__)
 logger = logging.getLogger(__name__)
 
-# Additional claims embedded in the Firebase custom token.
-# Available in Firestore security rules as request.auth.token.*
-# so rules can distinguish real KyberChat sessions from other Firebase tenants.
-_CUSTOM_CLAIMS: dict = {
-    'kyc': True,  # "KyberChat" flag — rules: request.auth.token.kyc == true
-}
+_app: firebase_admin.App | None = None
 
-# Firebase custom tokens are valid for 1 hour (Firebase-enforced maximum).
-_TOKEN_TTL_SECONDS = 3600
+# Blueprint — registered in main.py as:  app.register_blueprint(firebase_bp)
+firebase_bp = Blueprint("firebase", __name__)
 
 
-@firebase_bp.route('/firebase_token', methods=['POST'])
-def get_firebase_token():
+# ---------------------------------------------------------------------------
+# Internal: lazy initialisation
+# ---------------------------------------------------------------------------
+
+def _get_app() -> firebase_admin.App:
     """
-    Exchanges a valid KyberChat PASETO session token for a Firebase custom token.
+    Initialise the Firebase Admin SDK exactly once per process.
+    If another module (e.g. notifications.py) already initialised the default
+    app, we reuse it instead of raising ValueError.
+    Uses Application Default Credentials unless GOOGLE_APPLICATION_CREDENTIALS
+    points at a service-account JSON file.
+    """
+    global _app
+    if _app is not None:
+        return _app
 
-    The iOS client uses the Firebase custom token to call
-    Auth.auth().signIn(withCustomToken:), which sets request.auth.uid in
-    Firestore security rules to the caller's KyberChat user_uuid.
+    # Reuse an already-initialised default app (e.g. initialised by notifications.py)
+    try:
+        _app = firebase_admin.get_app()
+        return _app
+    except ValueError:
+        pass  # not yet initialised — fall through
 
-    Authentication: Bearer PASETO token (standard KyberChat session).
+    cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if cred_path and os.path.isfile(cred_path):
+        cred = credentials.Certificate(cred_path)
+        _app = firebase_admin.initialize_app(cred)
+        logger.info("Firebase Admin SDK initialised with service-account key.")
+    else:
+        # On Cloud Run with ADC the SDK picks up the runtime SA automatically.
+        _app = firebase_admin.initialize_app()
+        logger.info("Firebase Admin SDK initialised with Application Default Credentials.")
 
-    Request body: empty {} or omit body entirely.
+    return _app
 
-    Response 200:
-      {
-        "firebase_token": "<signed JWT string>",
-        "uid":            "<user_uuid>",
-        "expires_in":     3600
-      }
 
-    Response 401: PASETO token missing, invalid, or expired.
-    Response 503: Firebase Admin SDK unavailable (misconfigured service account).
-    Response 500: Unexpected server error.
+# ---------------------------------------------------------------------------
+# POST /firebase_token
+# ---------------------------------------------------------------------------
 
-    iOS client notes:
-      • Cache the result — only re-call when Firebase throws an auth error or on
-        cold launch after a full sign-out.
-      • The Firebase SDK auto-refreshes ID tokens obtained from signIn(withCustomToken:),
-        so 1-hour re-exchanges are NOT required in normal operation.
-      • Call sequence on login:
-          1. POST /validate_login  → store PASETO token
-          2. POST /firebase_token  → call Auth.auth().signIn(withCustomToken:)
-          3. POST /register_device → register FCM token
+def _require_paseto_auth(f):
+    """
+    Decorator that verifies the PASETO Bearer token and injects user_uuid as
+    the first positional argument to the wrapped function.
+    Uses the same verify_token() helper used elsewhere in the server.
+    """
+    from auth import verify_token as _verify
+    import functools
+
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        user_uuid, err = _verify(request)
+        if err:
+            body, status = err
+            return jsonify(body), status
+        return f(user_uuid, *args, **kwargs)
+
+    return wrapper
+
+
+@firebase_bp.route("/firebase_token", methods=["POST"])
+@_require_paseto_auth
+def firebase_token_endpoint(user_uuid: str):
+    """
+    Exchange a valid PASETO session token for a Firebase custom token.
+
+    The iOS/Android client calls this once per session (or after logout).
+    The returned firebase_token is passed to:
+      iOS:     Auth.auth().signIn(withCustomToken: token)
+      Android: Firebase.auth.signInWithCustomToken(token).await()
+
+    The resulting Firebase ID token satisfies Firestore security rules:
+      request.auth.uid == user_uuid
+
+    Returns:
+      200  {"firebase_token": "<signed-jwt>"}
+      503  {"error": "Firebase auth unavailable."}   (Admin SDK not initialised)
     """
     try:
-        # ── 1. Verify the KyberChat PASETO session ────────────────────────
-        user_uuid, err = verify_token(request)
-        if err:
-            return jsonify(err[0]), err[1]
+        token = create_custom_token(user_uuid)
+        return jsonify({"firebase_token": token}), 200
+    except Exception as exc:
+        logger.error("firebase_token error for %s: %s", user_uuid, exc)
+        return jsonify({"error": "Firebase authentication service unavailable."}), 503
 
-        # ── 2. Guard: Firebase Admin SDK must be initialised ──────────────
-        # notifications.py calls firebase_admin.initialize_app() at import time.
-        # If that failed (e.g. missing ADC on localhost), _apps will be empty.
-        if not firebase_admin._apps:
-            logger.error("Firebase Admin SDK is not initialised — cannot issue custom token")
-            return jsonify({'error': 'Firebase authentication service is not available'}), 503
 
-        # ── 3. Issue a Firebase custom token for this user_uuid ───────────
-        # The token's `uid` will equal user_uuid, which Firestore rules see
-        # as request.auth.uid. Additional claims are available as
-        # request.auth.token.<key> in security rules.
-        try:
-            raw = firebase_auth.create_custom_token(user_uuid, _CUSTOM_CLAIMS)
-            # firebase_admin ≥ 5.x returns bytes; older versions return str.
-            firebase_token = raw.decode('utf-8') if isinstance(raw, (bytes, bytearray)) else raw
-        except firebase_auth.UnexpectedResponseError as e:
-            # Likely a missing signBlob IAM permission on the service account.
-            logger.error(
-                f"Firebase custom token creation failed (check IAM: "
-                f"roles/iam.serviceAccountTokenCreator): {e}"
-            )
-            return jsonify({
-                'error': 'Firebase authentication service is not available',
-                'hint':  'Ensure the Cloud Run service account has roles/iam.serviceAccountTokenCreator'
-            }), 503
-        except Exception as e:
-            logger.error(f"Firebase custom token creation failed: {e}")
-            return jsonify({'error': 'Firebase authentication service is not available'}), 503
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
-        # ── 4. Return token + metadata ────────────────────────────────────
-        logger.info(f"Firebase custom token issued for user: {user_uuid}")
-        return jsonify({
-            'firebase_token': firebase_token,
-            'uid':            user_uuid,
-            # Millisecond epoch of when the custom token itself expires.
-            # The Firebase ID token the SDK derives from it auto-refreshes;
-            # this value is informational for client-side observability only.
-            'expires_in':     _TOKEN_TTL_SECONDS,
-            'issued_at':      int(time.time()),
-        }), 200
+def create_custom_token(user_uuid: str) -> str:
+    """
+    Issue a Firebase custom token for *user_uuid*.
 
-    except Exception as e:
-        logger.error(f"Unexpected error in /firebase_token: {e}")
-        return jsonify({'error': 'Internal server error'}), 500
+    The client exchanges this for a Firebase ID token via:
+      iOS:     Auth.auth().signIn(withCustomToken: token)
+      Android: Firebase.auth.signInWithCustomToken(token).await()
+
+    The resulting ID token satisfies Firestore security rules:
+      request.auth.uid == user_uuid
+
+    Raises firebase_admin.exceptions.FirebaseError on failure.
+    """
+    _get_app()
+    token = firebase_auth.create_custom_token(user_uuid)
+    # SDK may return bytes on some versions
+    if isinstance(token, bytes):
+        return token.decode("utf-8")
+    return token
+
+
+def send_fcm_notification(push_token: str, data_payload: dict) -> bool:
+    """
+    Send a silent, data-only FCM push to *push_token*.
+
+    *data_payload* must be a flat {str: str} dict, e.g.::
+        {"type": "NEW_MESSAGE"}
+        {"type": "FRIEND_REQUEST"}
+        {"type": "FRIEND_REQUEST_ACCEPTED"}
+
+    Both iOS and Android receive the same payload.
+
+      iOS path:   AppDelegate.application(_:didReceiveRemoteNotification:...)
+                  → posts NotificationCenter(.kycRefreshFriends)
+      Android:    KyberChatFCMService.onMessageReceived()
+                  → sends LocalBroadcast("kycRefreshFriends")
+
+    Returns True on success, False (logged) on any error.
+    Callers should not crash on False — FCM delivery is best-effort.
+    Stale tokens (404/UNREGISTERED) should be removed from the DB.
+    """
+    _get_app()
+
+    # Ensure all values are strings (FCM data payload requirement)
+    str_payload = {k: str(v) for k, v in data_payload.items()}
+
+    message = messaging.Message(
+        data=str_payload,
+        token=push_token,
+        # iOS: content-available triggers background fetch even with no alert
+        apns=messaging.APNSConfig(
+            headers={
+                "apns-push-type": "background",
+                "apns-priority": "5",        # low priority for silent push
+            },
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(content_available=True)
+            ),
+        ),
+        # Android: HIGH priority wakes the app from Doze mode
+        android=messaging.AndroidConfig(priority="high"),
+    )
+
+    try:
+        messaging.send(message)
+        return True
+    except messaging.UnregisteredError:
+        logger.warning("FCM token unregistered (stale): ...%s", push_token[-8:])
+        return False
+    except Exception as exc:
+        logger.error("FCM send failed for token ...%s: %s", push_token[-8:], exc)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Cloud Run SA setup (run once; idempotent)
+# ---------------------------------------------------------------------------
+#
+# gcloud projects add-iam-policy-binding quantchat-server \
+#   --member="serviceAccount:<SA_EMAIL>" \
+#   --role="roles/firebase.sdkAdminServiceAgent"
+#
+# gcloud projects add-iam-policy-binding quantchat-server \
+#   --member="serviceAccount:<SA_EMAIL>" \
+#   --role="roles/cloudmessaging.admin"
+#
+# Find the SA email:
+# gcloud run services describe quantchat-server --region=us-central1 \
+#   --format='value(spec.template.spec.serviceAccountName)'
+# ---------------------------------------------------------------------------
