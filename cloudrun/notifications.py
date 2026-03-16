@@ -9,7 +9,11 @@ logger = logging.getLogger(__name__)
 # automatically — no explicit key file needed.
 _fcm_ready = False
 try:
-    firebase_admin.initialize_app()
+    # Reuse already-initialised default app (e.g. from firebase.py) or init fresh.
+    try:
+        firebase_admin.get_app()
+    except ValueError:
+        firebase_admin.initialize_app()
     _fcm_ready = True
 except Exception as e:
     logger.warning(f"Firebase Admin SDK init failed — push notifications disabled: {e}")
