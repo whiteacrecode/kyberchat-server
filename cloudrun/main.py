@@ -280,6 +280,104 @@ def change_password():
         return jsonify({'error': 'Internal server error'}), 500
 
 
+@app.route('/keys/reset_identity', methods=['POST'])
+def reset_identity():
+    """
+    Replaces the user's identity key and KEM public key, and purges all
+    existing pre-keys (SPK + OTPKs).  The client must immediately follow
+    this call with POST /keys/upload to install a fresh pre-key bundle.
+
+    Intended for "Start Fresh" recovery when the user has lost their mnemonic
+    and needs to re-establish a cryptographic identity under the same account.
+
+    NOTE: All existing E2EE sessions with this user become invalid after this
+    call.  Recipients who cached the old public key will get decryption errors
+    until they fetch the updated bundle.  Delete all messages before calling
+    this endpoint (DELETE /messages/all).
+
+    Authentication: Bearer PASETO token.
+
+    Request body:
+      {
+        "identity_key_public":  "<64 hex chars — 32-byte X25519 public key>",
+        "kem_public_key":       "<2368 hex chars — 1184-byte ML-KEM-768 public key>"  (optional)
+      }
+
+    Returns:
+      200 { "message": "Identity key updated" }
+      400 validation error
+      401 bad token
+      404 user not found
+    """
+    try:
+        user_uuid, err = verify_token(request)
+        if err:
+            return jsonify(err[0]), err[1]
+
+        data = request.get_json() or {}
+
+        # ── Validate identity_key_public ───────────────────────────────────────
+        ik_hex = data.get('identity_key_public', '')
+        if not ik_hex:
+            return jsonify({'error': 'identity_key_public is required'}), 400
+        try:
+            ik_bytes = bytes.fromhex(ik_hex)
+        except ValueError:
+            return jsonify({'error': 'identity_key_public must be valid hex'}), 400
+        if len(ik_bytes) != 32:
+            return jsonify({'error': 'identity_key_public must be 32 bytes (64 hex chars)'}), 400
+
+        # ── Validate kem_public_key (optional) ────────────────────────────────
+        kem_bytes = None
+        kem_hex = data.get('kem_public_key', '')
+        if kem_hex:
+            try:
+                kem_bytes = bytes.fromhex(kem_hex)
+            except ValueError:
+                return jsonify({'error': 'kem_public_key must be valid hex'}), 400
+            if len(kem_bytes) != 1184:
+                return jsonify({'error': 'kem_public_key must be 1184 bytes (2368 hex chars)'}), 400
+
+        # ── Update DB ──────────────────────────────────────────────────────────
+        with engine.begin() as conn:
+            # Verify user exists
+            row = conn.execute(
+                text("SELECT user_uuid FROM users WHERE user_uuid = :u AND deleted = 0"),
+                {'u': user_uuid}
+            ).fetchone()
+            if not row:
+                return jsonify({'error': 'User not found'}), 404
+
+            # Update identity key (and KEM key if supplied)
+            if kem_bytes:
+                conn.execute(text("""
+                    UPDATE users
+                    SET identity_key_public = :ik, kem_public_key = :kem
+                    WHERE user_uuid = :u
+                """), {'ik': ik_bytes, 'kem': kem_bytes, 'u': user_uuid})
+            else:
+                conn.execute(text("""
+                    UPDATE users SET identity_key_public = :ik WHERE user_uuid = :u
+                """), {'ik': ik_bytes, 'u': user_uuid})
+
+            # Purge all pre-keys — they were signed with the old signing key
+            conn.execute(
+                text("DELETE FROM signed_pre_keys WHERE user_uuid = :u"),
+                {'u': user_uuid}
+            )
+            conn.execute(
+                text("DELETE FROM one_time_pre_keys WHERE user_uuid = :u"),
+                {'u': user_uuid}
+            )
+
+        logger.info(f"reset_identity: updated identity key for {user_uuid}")
+        return jsonify({'message': 'Identity key updated'}), 200
+
+    except Exception as e:
+        logger.error(f"Error in reset_identity for {user_uuid if 'user_uuid' in dir() else '?'}: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
 if __name__ == "__main__":
     # Cloud Run provides the PORT environment variable
     port = int(os.environ.get('PORT', 8080))
