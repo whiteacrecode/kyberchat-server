@@ -191,6 +191,76 @@ def delete_message(message_id: str):
         return jsonify({'error': 'Internal server error'}), 500
 
 
+@messages_bp.route('/messages/all', methods=['DELETE'])
+def delete_all_messages():
+    """
+    Deletes ALL messages and Firestore conversations for the authenticated user.
+
+    Called when the user chooses "Start Fresh" after losing their mnemonic.
+    Wipes:
+      • All rows in the MySQL `messages` table where the user is sender or recipient.
+      • All Firestore conversation sub-collections where the chatId contains the user's UUID.
+
+    Authentication: Bearer PASETO token.
+
+    Returns:
+      200 { "mysql_deleted": N, "firestore_conversations": M }
+    """
+    try:
+        user_uuid, err = verify_token(request)
+        if err:
+            return jsonify(err[0]), err[1]
+
+        # ── MySQL cleanup ──────────────────────────────────────────────────────
+        mysql_deleted = 0
+        with engine.begin() as conn:
+            result = conn.execute(text("""
+                DELETE FROM messages
+                WHERE sender_uuid = :uuid OR recipient_uuid = :uuid
+            """), {'uuid': user_uuid})
+            mysql_deleted = result.rowcount
+
+        # ── Firestore cleanup ──────────────────────────────────────────────────
+        firestore_conversations = 0
+        try:
+            from firebase import _get_app
+            import firebase_admin.firestore as fs
+            db = fs.client(app=_get_app())
+
+            # chatId format: sorted([uuid_a, uuid_b]).join("_")
+            # We can't do a server-side filter on document IDs, so we list all
+            # conversations and match those that contain this user's UUID as a
+            # full component (not a substring of another UUID).
+            conversations_ref = db.collection('conversations')
+            for conv_ref in conversations_ref.list_documents():
+                parts = conv_ref.id.split('_')
+                if user_uuid in parts:
+                    # Batch-delete all messages in this conversation
+                    msgs = conv_ref.collection('messages').list_documents()
+                    batch = db.batch()
+                    for msg_doc in msgs:
+                        batch.delete(msg_doc)
+                    batch.commit()
+                    conv_ref.delete()
+                    firestore_conversations += 1
+        except Exception as fe:
+            # Non-fatal: Firestore may not be configured in all environments
+            logger.warning(f"Firestore cleanup skipped for {user_uuid}: {fe}")
+
+        logger.info(
+            f"delete_all_messages: user={user_uuid} "
+            f"mysql_rows={mysql_deleted} firestore_convs={firestore_conversations}"
+        )
+        return jsonify({
+            'mysql_deleted': mysql_deleted,
+            'firestore_conversations': firestore_conversations,
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error in delete_all_messages for {user_uuid if 'user_uuid' in dir() else '?'}: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
 @messages_bp.route('/messages/ack', methods=['POST'])
 def ack_messages():
     """
