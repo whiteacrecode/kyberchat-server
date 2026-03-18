@@ -41,10 +41,11 @@ Wire format (JSON, transmitted over Firestore or any transport):
     "version":    1,
     "sender_uuid": "...",
     "x3dh_header": {               # only present in the FIRST message
-        "ik_public":   "<hex>",    # sender ephemeral IK for this session
-        "ek_public":   "<hex>",    # ephemeral key EK
-        "spk_id":      <int>,
-        "otpk_id":     <int> | null
+        "ik_public":      "<hex>",     # sender ephemeral IK for this session
+        "ek_public":      "<hex>",     # ephemeral key EK
+        "spk_id":         <int>,
+        "otpk_id":        <int> | null,
+        "kem_ciphertext": "<hex>" | null  # ML-KEM-768 encapsulated key (1088 bytes)
     },
     "ratchet_header": {
         "dh_public":   "<hex>",    # sender's current ratchet public key
@@ -83,11 +84,31 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+# ML-KEM-768 (CRYSTALS-Kyber / FIPS 203) — requires cryptography >= 43.0.0
+try:
+    from cryptography.hazmat.primitives.asymmetric.mlkem import (
+        MLKEMPrivateKey as _MLKEMPrivateKey,
+        MLKEMPublicKey as _MLKEMPublicKey,
+        MLKEM768 as _MLKEM768,
+    )
+    _MLKEM_AVAILABLE = True
+except ImportError:
+    _MLKEMPrivateKey = None  # type: ignore[assignment,misc]
+    _MLKEMPublicKey = None   # type: ignore[assignment,misc]
+    _MLKEM768 = None         # type: ignore[assignment,misc]
+    _MLKEM_AVAILABLE = False
+
 from auth import verify_token
 from db import engine
 
 logger = logging.getLogger(__name__)
 e2e_bp = Blueprint("e2e", __name__)
+
+if not _MLKEM_AVAILABLE:
+    logger.warning(
+        "cryptography < 43.0.0 installed — ML-KEM-768 hybrid X3DH disabled. "
+        "Upgrade: pip install 'cryptography>=43.0.0'"
+    )
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -467,18 +488,22 @@ def replenish_one_time_keys():
 @dataclass
 class X3DHHeader:
     """Transmitted with the first message so the receiver can derive the same SK."""
-    ik_public:  str   # sender's identity key public (hex)
-    ek_public:  str   # sender's ephemeral key public (hex)
-    spk_id:     int   # which SPK was used
-    otpk_id:    Optional[int]  # which OTPK was used (None if pool exhausted)
+    ik_public:      str            # sender's identity key public (hex)
+    ek_public:      str            # sender's ephemeral key public (hex)
+    spk_id:         int            # which SPK was used
+    otpk_id:        Optional[int]  # which OTPK was used (None if pool exhausted)
+    kem_ciphertext: Optional[str] = None  # ML-KEM-768 ciphertext hex (1088 bytes); None for pre-PQC
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "ik_public": self.ik_public,
             "ek_public": self.ek_public,
             "spk_id":    self.spk_id,
             "otpk_id":   self.otpk_id,
         }
+        if self.kem_ciphertext is not None:
+            d["kem_ciphertext"] = self.kem_ciphertext
+        return d
 
     @staticmethod
     def from_dict(d: dict) -> "X3DHHeader":
@@ -487,6 +512,7 @@ class X3DHHeader:
             ek_public=d["ek_public"],
             spk_id=d["spk_id"],
             otpk_id=d.get("otpk_id"),
+            kem_ciphertext=d.get("kem_ciphertext"),
         )
 
 
@@ -495,7 +521,9 @@ def x3dh_sender_init(
     recipient_bundle: dict,
 ) -> tuple[bytes, X3DHHeader]:
     """
-    Perform X3DH as the sending party.
+    Perform X3DH as the sending party.  Supports hybrid ML-KEM-768 when
+    recipient_bundle contains a non-null kem_public_key and cryptography >= 43
+    is installed.
 
     Parameters
     ----------
@@ -536,15 +564,33 @@ def x3dh_sender_init(
         dh4 = _x25519_dh(ek_priv, rotpk_pub)
         ikm += dh4
 
-    # KDF over concatenated DH outputs (Signal prepends 0xFF bytes for domain sep)
-    f   = b"\xff" * 32
-    sk  = _hkdf(f + ikm, salt=b"\x00" * 32, info=_SIGNAL_INFO_ROOT, length=32)
+    # ML-KEM-768 hybrid extension: encapsulate against recipient's KEM public key.
+    # KEM_SS is appended to ikm before the HKDF so compromise of either the
+    # classical or PQC layer alone does not break the session.
+    kem_ciphertext_hex: Optional[str] = None
+    kem_pub_hex = recipient_bundle.get("kem_public_key")
+    if _MLKEM_AVAILABLE and kem_pub_hex:
+        try:
+            kem_pub = _MLKEMPublicKey.from_public_bytes(
+                bytes.fromhex(kem_pub_hex), _MLKEM768()
+            )
+            kem_ct, kem_ss = kem_pub.encapsulate()
+            ikm += kem_ss
+            kem_ciphertext_hex = kem_ct.hex()
+        except Exception as exc:
+            logger.warning(f"ML-KEM encapsulation failed, falling back to classical X3DH: {exc}")
+
+    # KDF over concatenated DH (+ optional KEM_SS) outputs.
+    # Signal domain separator: prepend 0xFF * 32 before the key material.
+    f  = b"\xff" * 32
+    sk = _hkdf(f + ikm, salt=b"\x00" * 32, info=_SIGNAL_INFO_ROOT, length=32)
 
     header = X3DHHeader(
         ik_public=_pub_to_hex(sender_ik.public_key()),
         ek_public=_pub_to_hex(ek_pub),
         spk_id=recipient_bundle["signed_pre_key"]["key_id"],
         otpk_id=otpk_id,
+        kem_ciphertext=kem_ciphertext_hex,
     )
     return sk, header
 
@@ -554,17 +600,21 @@ def x3dh_receiver_init(
     receiver_spk: X25519PrivateKey,
     receiver_otpk: Optional[X25519PrivateKey],
     header: X3DHHeader,
+    receiver_kem_priv=None,  # MLKEMPrivateKey | None — required for hybrid sessions
 ) -> bytes:
     """
     Derive the same X3DH shared secret as the sender, using the X3DHHeader
-    that arrived with the first message.
+    that arrived with the first message.  Supports hybrid ML-KEM-768 when
+    header.kem_ciphertext is present and receiver_kem_priv is supplied.
 
     Parameters
     ----------
-    receiver_ik   : Recipient's long-term X25519 identity private key.
-    receiver_spk  : The SPK private key identified by header.spk_id.
-    receiver_otpk : The OTPK private key identified by header.otpk_id (or None).
-    header        : X3DHHeader from the first received message.
+    receiver_ik      : Recipient's long-term X25519 identity private key.
+    receiver_spk     : The SPK private key identified by header.spk_id.
+    receiver_otpk    : The OTPK private key identified by header.otpk_id (or None).
+    header           : X3DHHeader from the first received message.
+    receiver_kem_priv: Recipient's MLKEMPrivateKey (cryptography >= 43).
+                       Pass None for classical-only sessions.
 
     Returns
     -------
@@ -582,6 +632,16 @@ def x3dh_receiver_init(
     if receiver_otpk:
         dh4 = _x25519_dh(receiver_otpk, ek_pub)
         ikm += dh4
+
+    # ML-KEM-768 hybrid extension: decapsulate KEM ciphertext to recover KEM_SS.
+    # Must produce the identical ikm as the sender to derive the same SK.
+    if _MLKEM_AVAILABLE and header.kem_ciphertext and receiver_kem_priv is not None:
+        try:
+            kem_ct = bytes.fromhex(header.kem_ciphertext)
+            kem_ss = receiver_kem_priv.decapsulate(kem_ct)
+            ikm += kem_ss
+        except Exception as exc:
+            raise ValueError(f"ML-KEM decapsulation failed — cannot derive session key: {exc}") from exc
 
     f  = b"\xff" * 32
     sk = _hkdf(f + ikm, salt=b"\x00" * 32, info=_SIGNAL_INFO_ROOT, length=32)
@@ -911,13 +971,17 @@ def open_session_as_sender(
 
 
 def open_session_as_receiver(
-    receiver_ik_priv:   X25519PrivateKey,
-    receiver_spk_priv:  X25519PrivateKey,
-    receiver_otpk_priv: Optional[X25519PrivateKey],
-    x3dh_header:        X3DHHeader,
+    receiver_ik_priv:    X25519PrivateKey,
+    receiver_spk_priv:   X25519PrivateKey,
+    receiver_otpk_priv:  Optional[X25519PrivateKey],
+    x3dh_header:         X3DHHeader,
+    receiver_kem_priv=None,  # MLKEMPrivateKey | None
 ) -> RatchetSession:
     """
     One-call bootstrap for Bob receiving Alice's first message.
+
+    Pass receiver_kem_priv (MLKEMPrivateKey, cryptography >= 43) when the
+    session header contains a kem_ciphertext (hybrid PQC sessions).
 
     Returns an initialised RatchetSession ready for decrypt().
     """
@@ -926,5 +990,6 @@ def open_session_as_receiver(
         receiver_spk_priv,
         receiver_otpk_priv,
         x3dh_header,
+        receiver_kem_priv=receiver_kem_priv,
     )
     return RatchetSession.init_receiver(sk, receiver_spk_priv)
