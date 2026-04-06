@@ -9,6 +9,7 @@ __pycache__/
 # it has passwords
 deploy.sh
 
+.DS_Store
 
 # Distribution / packaging
 .Python
