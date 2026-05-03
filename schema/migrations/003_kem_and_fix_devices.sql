@@ -18,9 +18,9 @@
 USE e2e_chat_service;
 
 -- 1. ML-KEM-768 public key on users
---    Mirrors cloudrun/migrations/001_add_kem_public_key.sql, which was applied
+--    Same DDL as schema/migrations/005_add_kem_public_key.sql, which was applied
 --    to the Cloud SQL instance directly. This migration brings schema/schema.sql
---    into sync so both migration paths are consistent.
+--    into sync so the column survives a from-scratch rebuild.
 ALTER TABLE users
     ADD COLUMN IF NOT EXISTS kem_public_key BLOB NULL
     COMMENT 'ML-KEM-768 public key (1184 bytes). NULL for pre-PQC accounts registered before this migration.';
