@@ -14,6 +14,7 @@ from search import search_bp
 from messages import messages_bp
 from devices import devices_bp
 from firebase import firebase_bp
+from recovery import recovery_bp
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -23,6 +24,7 @@ app.register_blueprint(search_bp)
 app.register_blueprint(messages_bp)
 app.register_blueprint(devices_bp)
 app.register_blueprint(firebase_bp)
+app.register_blueprint(recovery_bp)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
