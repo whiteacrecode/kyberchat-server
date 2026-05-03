@@ -83,3 +83,31 @@ CREATE TABLE friends (
     INDEX (addressee_uuid, status)
 );
 
+-- 6. Recovery Blobs Table
+-- Client-side encrypted keychain backups. The server stores opaque ciphertext
+-- and the KDF parameters needed for the client to derive its wrap key from a
+-- password — it never sees plaintext key material and cannot decrypt the blob.
+--
+-- Blob plaintext (JSON, only the client sees this):
+--   { v, u, ms, ik, sk, kem, spk?: {id, priv}, otpks: [{id, priv}, ...] }
+--
+-- The wrap key is AES-256, derived via PBKDF2-HMAC-SHA256(password, kdf_salt,
+-- kdf_iters). Ciphertext is AES-256-GCM (auth tag appended).
+--
+-- Compromise of this row alone does not yield key material — an attacker must
+-- still mount an offline PBKDF2 brute-force against the user's password.
+CREATE TABLE recovery_blobs (
+    user_uuid     CHAR(36)      NOT NULL PRIMARY KEY,
+    blob_version  INT           NOT NULL DEFAULT 1, -- plaintext schema version (client-controlled)
+    ciphertext    LONGBLOB      NOT NULL,           -- AES-256-GCM ciphertext + 16-byte tag appended
+    nonce         VARBINARY(12) NOT NULL,           -- AES-GCM nonce, fresh per upload
+    kdf_algo      VARCHAR(64)   NOT NULL DEFAULT 'pbkdf2-sha256',
+    kdf_iters     INT           NOT NULL,           -- server enforces minimum (100000)
+    kdf_salt      VARBINARY(32) NOT NULL,           -- 16 bytes today; column allows future KDFs
+    created_at    TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TIMESTAMP     NOT NULL
+        DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE
+);
+
