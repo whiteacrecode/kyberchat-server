@@ -1,0 +1,35 @@
+steps:
+  # Build the Docker image from the cloudrun/ subdirectory
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/quantchat-server:$COMMIT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/quantchat-server:latest'
+      - './cloudrun'
+
+  # Push both tags to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/quantchat-server:$COMMIT_SHA']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/quantchat-server:latest']
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'quantchat-server'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/quantchat-server:$COMMIT_SHA'
+      - '--region'
+      - 'us-central1'
+      - '--platform'
+      - 'managed'
+
+images:
+  - 'gcr.io/$PROJECT_ID/quantchat-server:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/quantchat-server:latest'
