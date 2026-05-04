@@ -33,3 +33,6 @@ steps:
 images:
   - 'gcr.io/$PROJECT_ID/quantchat-server:$COMMIT_SHA'
   - 'gcr.io/$PROJECT_ID/quantchat-server:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
