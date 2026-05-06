@@ -1,9 +1,13 @@
+#!/bin/bash
+
 # 1. Get a PASETO token (login)
 TOKEN=$(curl -s -X POST \
-  https://quantchat-server-1078066473760.us-central1.run.app/validate_login \
+  https://api.kyberchar.com/validate_login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"tomw","password":"*****"}' \
+  -d '{"username":"tomw","password":"69ftelvis"}' \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+ECHO "token $TOKEN"
 
 # 2. Exchange for Firebase token
 curl -X POST \
