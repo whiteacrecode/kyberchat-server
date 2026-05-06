@@ -1,0 +1,84 @@
+# Cloud Build pipeline for quantchat-server
+#
+# Builds the Docker image from cloudrun/, pushes to Artifact Registry,
+# and deploys to the Cloud Run service.
+#
+# Works for both manual `gcloud builds submit` and GitHub push triggers.
+# $BUILD_ID is always available; $SHORT_SHA is only set by push triggers.
+#
+# Manual submit:
+#   gcloud builds submit . --config=cloudbuild.yaml --project=quantchat-server
+#
+# One-time Artifact Registry setup (run once per project):
+#   gcloud artifacts repositories create cloud-run-source-deploy \
+#     --repository-format=docker \
+#     --location=us-central1 \
+#     --project=quantchat-server
+
+substitutions:
+  _REGION: us-central1
+  _SERVICE: quantchat-server
+  _CLOUDSQL_INST: quantchat-server:us-central1:quantchat
+  _IMAGE: us-central1-docker.pkg.dev/quantchat-server/cloud-run-source-deploy/quantchat-server
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  # Use a bigger machine so the pip install layer doesn't time out
+  machineType: E2_HIGHCPU_8
+
+steps:
+  # ── Step 1: Build the container image ────────────────────────────────────────
+  # Build context is cloudrun/ because that's where the Dockerfile lives.
+  # Tagged with $BUILD_ID (always set) + :latest for layer caching.
+  - name: gcr.io/cloud-builders/docker
+    id: build
+    args:
+      - build
+      - --tag=$_IMAGE:$BUILD_ID
+      - --tag=$_IMAGE:latest
+      - --cache-from=$_IMAGE:latest      # reuse layers from previous build
+      - --file=cloudrun/Dockerfile
+      - cloudrun                          # build context = cloudrun/ directory
+    waitFor: ['-']                        # start immediately
+
+  # ── Step 2: Push both tags ────────────────────────────────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    id: push-build-id
+    args: [push, '$_IMAGE:$BUILD_ID']
+    waitFor: [build]
+
+  - name: gcr.io/cloud-builders/docker
+    id: push-latest
+    args: [push, '$_IMAGE:latest']
+    waitFor: [build]
+
+  # ── Step 3: Deploy to Cloud Run ───────────────────────────────────────────────
+  # Deploys the BUILD_ID-pinned image so every rollout is traceable.
+  # To add Secret Manager secrets, append flags like:
+  #   --set-secrets=PASETO_KEY=paseto-key:latest,DB_PASS=db-password:latest
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: deploy
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - $_SERVICE
+      - --image=$_IMAGE:$BUILD_ID
+      - --region=$_REGION
+      - --project=$PROJECT_ID
+      - --platform=managed
+      - --allow-unauthenticated          # public API; remove if adding Cloud Run IAM auth
+      - --add-cloudsql-instances=$_CLOUDSQL_INST
+      - --min-instances=0
+      - --max-instances=10
+      - --concurrency=80
+      - --cpu=1
+      - --memory=512Mi
+      - --timeout=60
+      - --update-labels=build=$BUILD_ID
+    waitFor: [push-build-id]
+
+# Record the pinned image in build provenance
+images:
+  - '$_IMAGE:$BUILD_ID'
+  - '$_IMAGE:latest'

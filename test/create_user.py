@@ -11,7 +11,7 @@ import random
 import uuid
 
 BASE_URL = "https://quantchat-server-1078066473760.us-central1.run.app"
-
+BASE_URL = "https://quantchat-server-1078066473760.us-central1.run.app"
 
 def main():
     parser = argparse.ArgumentParser(description="Test the /create_user endpoint")
