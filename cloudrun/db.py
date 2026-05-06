@@ -1,4 +1,5 @@
 import os
+import logging
 from sqlalchemy import create_engine
 from sqlalchemy.engine import URL
 from argon2 import PasswordHasher
@@ -19,6 +20,10 @@ def _get_db_url():
     Constructs the SQLAlchemy URL.
     Handles Unix Sockets for Cloud Run and TCP for local development.
     """
+    logging.info(f"db host is {_DB_HOST}")
+    logging.info(f"db pass is {_DB_PASS}")
+    logging.info(f"db name is {_DB_NAME}")
+    logging.info(f"db user is {_DB_USER}")
     if _DB_HOST and _DB_HOST.startswith('/'):
         # Unix Socket (Google Cloud Run)
         return URL.create(
@@ -29,6 +34,7 @@ def _get_db_url():
             query={"unix_socket": _DB_HOST}
         )
     else:
+        lo
         # TCP Connection (Local Dev / External IP)
         return URL.create(
             drivername="mysql+pymysql",
