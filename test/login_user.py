@@ -7,6 +7,7 @@ import sys
 import urllib.request
 import urllib.error
 
+BASE_URL = "https://api.kyberchat.com"
 BASE_URL = "https://quantchat-server-1078066473760.us-central1.run.app"
 
 
