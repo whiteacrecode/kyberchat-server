@@ -18,6 +18,7 @@ def _get_db_url():
     """
     Constructs the SQLAlchemy URL.
     Handles Unix Sockets for Cloud Run and TCP for local development.
+    """
 
 
     if _DB_HOST and _DB_HOST.startswith('/'):
