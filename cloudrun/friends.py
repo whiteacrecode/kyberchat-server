@@ -5,8 +5,8 @@ from sqlalchemy.exc import IntegrityError
 
 from db import engine
 from auth import verify_token
-from cache import is_online, check_rate_limit
-from notifications import notify_friend_request, notify_request_accepted
+from cache import check_rate_limit
+from notifications import notify_user
 
 friends_bp = Blueprint('friends', __name__)
 logger = logging.getLogger(__name__)
@@ -141,16 +141,8 @@ def send_friend_request():
                 VALUES (:requester, :addressee, 'pending')
             """), {'requester': requester_uuid, 'addressee': addressee_uuid})
 
-            # Fetch the addressee's most recent push token while still in transaction
-            device = conn.execute(text("""
-                SELECT push_token FROM user_devices
-                WHERE user_uuid = :u
-                ORDER BY updated_at DESC LIMIT 1
-            """), {'u': addressee_uuid}).fetchone()
-
         # 4. Poke the addressee outside the DB transaction
-        push_token = device[0] if device else None
-        notify_friend_request(push_token, is_online(addressee_uuid))
+        notify_user(addressee_uuid, 'FRIEND_REQUEST')
 
         logger.info(f"Friend request sent: {requester_uuid} → {addressee_uuid}")
         return jsonify({'status': 'pending'}), 201
@@ -203,15 +195,7 @@ def accept_friend_request():
             if result.rowcount == 0:
                 return jsonify({'error': 'No pending request found'}), 404
 
-            # Fetch the requester's push token to notify them of acceptance
-            device = conn.execute(text("""
-                SELECT push_token FROM user_devices
-                WHERE user_uuid = :u
-                ORDER BY updated_at DESC LIMIT 1
-            """), {'u': requester_uuid}).fetchone()
-
-        push_token = device[0] if device else None
-        notify_request_accepted(push_token)
+        notify_user(requester_uuid, 'FRIEND_REQUEST_ACCEPTED')
 
         logger.info(f"Friend request accepted: {requester_uuid} → {accepter_uuid}")
         return jsonify({'status': 'accepted'}), 200
@@ -279,15 +263,7 @@ def accept_preview():
                 VALUES (:requester, :accepter, 'accepted')
             """), {'requester': requester_uuid, 'accepter': accepter_uuid})
 
-            # Fetch requester's push token to notify them
-            device = conn.execute(text("""
-                SELECT push_token FROM user_devices
-                WHERE user_uuid = :u
-                ORDER BY updated_at DESC LIMIT 1
-            """), {'u': requester_uuid}).fetchone()
-
-        push_token = device[0] if device else None
-        notify_request_accepted(push_token)
+        notify_user(requester_uuid, 'FRIEND_REQUEST_ACCEPTED')
 
         logger.info(f"Connection accepted (preview): {requester_uuid} ← {accepter_uuid}")
         return jsonify({'status': 'accepted'}), 200
