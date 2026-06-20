@@ -7,7 +7,7 @@ from sqlalchemy import text
 
 from auth import verify_token
 from db import engine
-from notifications import notify_new_message
+from notifications import notify_user
 
 messages_bp = Blueprint('messages', __name__)
 logger = logging.getLogger(__name__)
@@ -64,20 +64,13 @@ def send_message():
             }), 400
 
         with engine.begin() as conn:
-            # Verify recipient exists and fetch their push token
+            # Verify recipient exists
             row = conn.execute(text("""
-                SELECT u.user_uuid, d.push_token
-                FROM users u
-                LEFT JOIN user_devices d ON d.user_uuid = u.user_uuid
-                WHERE u.user_uuid = :uuid AND u.deleted = 0
-                ORDER BY d.updated_at DESC
-                LIMIT 1
+                SELECT user_uuid FROM users WHERE user_uuid = :uuid AND deleted = 0
             """), {'uuid': recipient_uuid}).fetchone()
 
             if not row:
                 return jsonify({'error': 'Recipient not found'}), 404
-
-            push_token = row[1]
 
             message_id = str(uuid_module.uuid4())
             conn.execute(text("""
@@ -90,7 +83,7 @@ def send_message():
                 'ciphertext': data['ciphertext'],
             })
 
-        notify_new_message(push_token)
+        notify_user(recipient_uuid, 'NEW_MESSAGE')
 
         logger.info(f"Message stored: {sender_uuid} → {recipient_uuid} ({message_id})")
         return jsonify({'message_id': message_id}), 201

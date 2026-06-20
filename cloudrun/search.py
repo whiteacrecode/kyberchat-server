@@ -4,8 +4,8 @@ from sqlalchemy import text
 
 from db import engine
 from auth import verify_token
-from cache import is_online, check_rate_limit
-from notifications import notify_connection_request
+from cache import check_rate_limit
+from notifications import notify_user
 
 search_bp = Blueprint('search', __name__)
 logger = logging.getLogger(__name__)
@@ -118,15 +118,6 @@ def search_user():
             if existing:
                 return jsonify({'status': existing[0], 'user_uuid': target_uuid}), 200
 
-            # 3. Fetch push token if we'll need to notify
-            device = None
-            if target_private:
-                device = conn.execute(text("""
-                    SELECT push_token FROM user_devices
-                    WHERE user_uuid = :u
-                    ORDER BY created_at DESC LIMIT 1
-                """), {'u': target_uuid}).fetchone()
-
         # 4a. Public account — return info for the caller to use /friends/request
         if not target_private:
             logger.info(f"Search: {requester_uuid} found public user {target_uuid}")
@@ -137,8 +128,7 @@ def search_user():
             }), 200
 
         # 4b. Private account — notify target, do not reveal UUID to requester
-        push_token = device[0] if device else None
-        notify_connection_request(push_token, requester_uuid, is_online(target_uuid))
+        notify_user(target_uuid, 'CONNECTION_REQUEST', extra={'requester_uuid': requester_uuid})
 
         logger.info(f"Search: {requester_uuid} notified private user {target_uuid}")
         return jsonify({'private': 1, 'status': 'notified'}), 200
