@@ -19,6 +19,7 @@ substitutions:
   _REGION: us-central1
   _SERVICE: quantchat-server
   _CLOUDSQL_INST: quantchat-server:us-central1:quantchat
+  _DB_NAME: e2e_chat_service
   _IMAGE: us-central1-docker.pkg.dev/quantchat-server/cloud-run-source-deploy/quantchat-server
 
 options:
@@ -69,6 +70,7 @@ steps:
       - --platform=managed
       - --allow-unauthenticated          # public API; remove if adding Cloud Run IAM auth
       - --add-cloudsql-instances=$_CLOUDSQL_INST
+      - --set-env-vars=DB_HOST=/cloudsql/$_CLOUDSQL_INST,DB_NAME=$_DB_NAME
       - --min-instances=0
       - --max-instances=10
       - --concurrency=80
