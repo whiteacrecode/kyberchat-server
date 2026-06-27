@@ -9,3 +9,6 @@ firebase-admin==6.4.0
 # Pin cryptography explicitly above firebase-admin's transitive floor so
 # ML-KEM-768 hybrid X3DH is available (requires >= 43.0.0).
 cryptography==43.0.3
+# GCS signed URLs for encrypted media blobs (Phase 1 A/V messaging).
+# firebase-admin already pulls this in transitively; explicit pin for clarity.
+google-cloud-storage==2.18.0

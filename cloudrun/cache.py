@@ -45,16 +45,31 @@ def is_online(user_uuid: str) -> bool:
 
 def check_rate_limit(user_uuid: str) -> bool:
     """
-    Returns True if the user is within their limit, False if exceeded.
+    Returns True if the user is within their friend-request limit, False if exceeded.
+    Fails open: if Redis is unreachable the request is allowed through.
+    """
+    return check_rate_limit_for('friend_request', user_uuid, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW)
+
+
+def check_rate_limit_for(key_prefix: str, user_uuid: str,
+                          max_count: int, window: int) -> bool:
+    """
+    Generic sliding-window rate limiter backed by Redis INCR + EXPIRE.
+
+    key_prefix  — namespaces the Redis key, e.g. 'friend_request' or 'media_upload'
+    max_count   — maximum allowed calls within the window
+    window      — window length in seconds
+
+    Returns True if the request is within the limit.
     Fails open: if Redis is unreachable the request is allowed through.
     """
     try:
         client = _get_redis()
-        key = f'rate:friend_request:{user_uuid}'
+        key = f'rate:{key_prefix}:{user_uuid}'
         count = client.incr(key)
         if count == 1:
-            client.expire(key, RATE_LIMIT_WINDOW)
-        return count <= RATE_LIMIT_MAX
+            client.expire(key, window)
+        return count <= max_count
     except Exception as e:
-        logger.warning(f"Redis rate limit check failed (failing open): {e}")
+        logger.warning(f"Redis rate limit check failed (failing open) [{key_prefix}]: {e}")
         return True
