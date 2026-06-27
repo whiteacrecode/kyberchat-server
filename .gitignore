@@ -255,3 +255,4 @@ __marimo__/
 # Directory local variables (if you don’t want them shared)
 .dir-locals-2.el
 
+PLAN.md
