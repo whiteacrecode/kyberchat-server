@@ -157,6 +157,99 @@ def send_friend_request():
         return jsonify({'error': 'Internal server error'}), 500
 
 
+@friends_bp.route('/friends/pending', methods=['POST'])
+def get_pending_friend_requests():
+    """
+    Returns incoming friend requests directed at the authenticated user that
+    are still awaiting a decision (status='pending').
+
+    Authentication: Bearer PASETO token.
+
+    Each entry includes what the client needs to render the request and act
+    on it via POST /friends/accept or POST /friends/decline:
+      - requester_uuid
+      - username
+      - created_at (ISO-8601)
+
+    Headers:
+      Authorization: Bearer <token>
+    """
+    try:
+        user_uuid, err = verify_token(request)
+        if err:
+            return jsonify(err[0]), err[1]
+
+        with engine.connect() as connection:
+            rows = connection.execute(text("""
+                SELECT u.user_uuid, u.username, f.created_at
+                FROM friends f
+                JOIN users u ON f.requester_uuid = u.user_uuid
+                WHERE f.addressee_uuid = :u
+                  AND f.status = 'pending'
+                  AND u.deleted = 0
+                ORDER BY f.created_at DESC
+            """), {'u': user_uuid}).fetchall()
+
+        requests = [
+            {
+                'requester_uuid': row[0],
+                'username': row[1],
+                'created_at': row[2].isoformat() if row[2] else None
+            }
+            for row in rows
+        ]
+
+        return jsonify({'requests': requests}), 200
+
+    except Exception as e:
+        logger.error(f"Error fetching pending friend requests: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+@friends_bp.route('/friends/decline', methods=['POST'])
+def decline_friend_request():
+    """
+    Declines a pending friend request directed at the authenticated user.
+    Deletes the pending row outright (no 'declined' status is retained), so
+    the requester is free to send a new request in the future.
+
+    Request body: { "requester_uuid": "..." }
+    Headers:      Authorization: Bearer <token>
+
+    Returns:
+      200 { "message": "Friend request declined" }
+      404 { "error": "No pending request found" }
+    """
+    try:
+        accepter_uuid, err = verify_token(request)
+        if err:
+            return jsonify(err[0]), err[1]
+
+        data = request.get_json()
+        if not data or 'requester_uuid' not in data:
+            return jsonify({'error': 'Missing requester_uuid'}), 400
+
+        requester_uuid = data['requester_uuid']
+
+        with engine.begin() as conn:
+            result = conn.execute(text("""
+                DELETE FROM friends
+                WHERE requester_uuid = :requester
+                  AND addressee_uuid = :accepter
+                  AND status = 'pending'
+            """), {'requester': requester_uuid, 'accepter': accepter_uuid})
+
+            if result.rowcount == 0:
+                return jsonify({'error': 'No pending request found'}), 404
+
+        logger.info(f"Friend request declined: {requester_uuid} → {accepter_uuid}")
+        return jsonify({'message': 'Friend request declined'}), 200
+
+    except Exception as e:
+        logger.error(f"Error declining friend request: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
 @friends_bp.route('/friends/accept', methods=['POST'])
 def accept_friend_request():
     """
