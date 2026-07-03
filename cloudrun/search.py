@@ -1,14 +1,34 @@
+import base64
 import logging
 from flask import Blueprint, request, jsonify
 from sqlalchemy import text
 
 from db import engine
 from auth import verify_token
-from cache import check_rate_limit
+from cache import check_rate_limit, check_rate_limit_for
 from notifications import notify_user
+from profile import normalize_email, normalize_phone
 
 search_bp = Blueprint('search', __name__)
 logger = logging.getLogger(__name__)
+
+USERS_SEARCH_PAGE_SIZE = 20
+USERS_SEARCH_RATE_LIMIT_MAX = 10
+USERS_SEARCH_RATE_LIMIT_WINDOW = 3600  # seconds
+
+
+def _decode_page_token(token: str | None) -> int:
+    """Opaque pagination cursor: base64 of a plain integer offset."""
+    if not token:
+        return 0
+    try:
+        return max(0, int(base64.urlsafe_b64decode(token.encode()).decode()))
+    except Exception:
+        return 0
+
+
+def _encode_page_token(offset: int) -> str:
+    return base64.urlsafe_b64encode(str(offset).encode()).decode()
 
 
 @search_bp.route('/user/lookup', methods=['POST'])
@@ -135,4 +155,137 @@ def search_user():
 
     except Exception as e:
         logger.error(f"Error in search_user: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+@search_bp.route('/users/search', methods=['POST'])
+def search_users():
+    """
+    Searches for users by exact username, phone, and/or email match, with
+    pagination. Unlike /search_user, this is a pure read — no notification
+    is sent as a side effect of searching. Sending a friend request for any
+    result (public or private) is done separately via the existing
+    POST /friends/request, which already resolves by username regardless
+    of the target's privacy flag.
+
+    Privacy: phone/email matches are restricted to public accounts
+    (users.private = 0) — a private account is reachable ONLY by exact
+    username, and even then the response omits user_uuid entirely so the
+    client has no way to fetch an avatar or otherwise treat it like a
+    public result.
+
+    Authentication: Bearer PASETO token.
+    Rate limit: 10 calls per hour per user (separate bucket from
+    /friends/request's 5/hr — this is a distinct action).
+
+    Request body:
+      {
+        "username":   "optional — exact match, any privacy setting",
+        "phone":      "optional — exact match, public accounts only",
+        "email":      "optional — exact match, public accounts only",
+        "page_token": "optional — opaque cursor from a previous response"
+      }
+    At least one of username/phone/email is required.
+
+    Response 200:
+      {
+        "results": [
+          { "user_uuid": "...", "username": "...", "private": 0,
+            "status": "none"|"pending"|"accepted", "matched_fields": ["phone"] },
+          { "username": "...", "private": 1, "status": "none"|"pending"|"accepted" }
+        ],
+        "next_page_token": "..." | null
+      }
+    """
+    try:
+        requester_uuid, err = verify_token(request)
+        if err:
+            return jsonify(err[0]), err[1]
+
+        if not check_rate_limit_for('user_search', requester_uuid,
+                                     USERS_SEARCH_RATE_LIMIT_MAX, USERS_SEARCH_RATE_LIMIT_WINDOW):
+            return jsonify({'error': 'Rate limit exceeded. Try again later.'}), 429
+
+        data = request.get_json() or {}
+        username = (data.get('username') or '').strip() or None
+        phone = (data.get('phone') or '').strip() or None
+        email = (data.get('email') or '').strip() or None
+
+        if not username and not phone and not email:
+            return jsonify({'error': 'Provide at least one of username, phone, or email'}), 400
+
+        if phone:
+            phone = normalize_phone(phone)
+        if email:
+            email = normalize_email(email)
+
+        offset = _decode_page_token(data.get('page_token'))
+
+        conditions = []
+        params = {'requester': requester_uuid}
+        if username:
+            conditions.append("u.username = :username")
+            params['username'] = username
+        if phone:
+            conditions.append("(u.private = 0 AND p.phone = :phone)")
+            params['phone'] = phone
+        if email:
+            conditions.append("(u.private = 0 AND p.email = :email)")
+            params['email'] = email
+
+        where_clause = " OR ".join(conditions)
+
+        with engine.connect() as conn:
+            rows = conn.execute(text(f"""
+                SELECT u.user_uuid, u.username, u.private, p.phone, p.email
+                FROM users u
+                LEFT JOIN user_profiles p ON p.user_uuid = u.user_uuid
+                WHERE u.deleted = 0
+                  AND u.user_uuid != :requester
+                  AND ({where_clause})
+                ORDER BY u.username ASC
+                LIMIT :limit OFFSET :offset
+            """), {**params, 'limit': USERS_SEARCH_PAGE_SIZE + 1, 'offset': offset}).fetchall()
+
+            has_more = len(rows) > USERS_SEARCH_PAGE_SIZE
+            rows = rows[:USERS_SEARCH_PAGE_SIZE]
+
+            results = []
+            for target_uuid, target_username, target_private, target_phone, target_email in rows:
+                existing = conn.execute(text("""
+                    SELECT status FROM friends
+                    WHERE (requester_uuid = :a AND addressee_uuid = :b)
+                       OR (requester_uuid = :b AND addressee_uuid = :a)
+                """), {'a': requester_uuid, 'b': target_uuid}).fetchone()
+                status = existing[0] if existing else 'none'
+
+                if target_private:
+                    results.append({
+                        'username': target_username,
+                        'private': 1,
+                        'status': status,
+                    })
+                else:
+                    matched_fields = []
+                    if username and target_username == username:
+                        matched_fields.append('username')
+                    if phone and target_phone == phone:
+                        matched_fields.append('phone')
+                    if email and target_email == email:
+                        matched_fields.append('email')
+                    results.append({
+                        'user_uuid': target_uuid,
+                        'username': target_username,
+                        'private': 0,
+                        'status': status,
+                        'matched_fields': matched_fields,
+                    })
+
+        next_page_token = _encode_page_token(offset + USERS_SEARCH_PAGE_SIZE) if has_more else None
+
+        logger.info(f"users/search: {requester_uuid} found {len(results)} match(es)")
+        return jsonify({'results': results, 'next_page_token': next_page_token}), 200
+
+    except Exception as e:
+        logger.error(f"Error in search_users: {e}")
         return jsonify({'error': 'Internal server error'}), 500
