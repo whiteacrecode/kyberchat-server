@@ -20,7 +20,7 @@ import os
 import logging
 
 import firebase_admin
-from firebase_admin import auth as firebase_auth, credentials, messaging
+from firebase_admin import auth as firebase_auth, credentials, firestore, messaging
 from flask import Blueprint, jsonify, request
 
 logger = logging.getLogger(__name__)
@@ -193,6 +193,40 @@ def send_fcm_notification(push_token: str, data_payload: dict) -> bool:
     except Exception as exc:
         logger.error("FCM send failed for token ...%s: %s", push_token[-8:], exc)
         return False
+
+
+# ---------------------------------------------------------------------------
+# Group membership mirror (Phase 1 of the group-chat feature — GROUP_PLAN.md)
+# ---------------------------------------------------------------------------
+#
+# MySQL (`kybergroups` / `group_members`) is the source of truth for who is
+# in a group. Firestore security rules can't query MySQL, so on every
+# membership mutation the server (trusted, via Admin SDK — bypasses rules)
+# mirrors the current roster into a Firestore doc that the rules *can* read
+# with get(). This mirror is metadata only (a list of UUIDs) — no sender
+# keys, no message content.
+
+def sync_group_membership(group_uuid: str, member_uuids: list[str]) -> None:
+    """
+    Overwrite groups/{group_uuid} in Firestore with the current member list.
+    Called after create/add/remove/leave so the mirror always reflects the
+    latest MySQL state. Safe to call with the full roster every time —
+    last-write-wins is fine since MySQL is the source of truth.
+    """
+    _get_app()
+    client = firestore.client()
+    client.collection("groups").document(group_uuid).set({"members": member_uuids})
+
+
+def delete_group_membership_mirror(group_uuid: str) -> None:
+    """
+    Remove groups/{group_uuid} from Firestore. Once gone, the group_conversations
+    security rule's get() lookup fails closed (Firestore rules deny on
+    exceptions), so nobody can read/write that group's messages any more.
+    """
+    _get_app()
+    client = firestore.client()
+    client.collection("groups").document(group_uuid).delete()
 
 
 # ---------------------------------------------------------------------------

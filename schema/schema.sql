@@ -192,3 +192,32 @@ CREATE OR REPLACE TABLE media_uploads (
     INDEX idx_expires (expires_at, deleted)
 );
 
+-- 10. Kybergroups Table
+-- One row per group chat. `owner_uuid` is the creator; ownership does not
+-- currently transfer. See GROUP_PLAN.md for the full group-chat design.
+-- Named `kybergroups`, not `groups` — GROUPS is a reserved word in MySQL 8.
+CREATE OR REPLACE TABLE kybergroups (
+    group_uuid   CHAR(36)     PRIMARY KEY, -- client-generated UUID v4
+    group_name   VARCHAR(100) NOT NULL,
+    owner_uuid   CHAR(36)     NOT NULL,
+    created_at   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted      INT          NOT NULL DEFAULT 0, -- 0 = active, 1 = soft-deleted
+    FOREIGN KEY (owner_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE
+);
+
+-- 11. Group Members Table
+-- Membership roster, metadata only — no sender keys or message content.
+-- Mirrored into Firestore (groups/{groupId}.members) via the Firebase Admin
+-- SDK on every mutation, since Firestore security rules cannot query MySQL.
+CREATE OR REPLACE TABLE group_members (
+    group_uuid  CHAR(36)               NOT NULL,
+    user_uuid   CHAR(36)               NOT NULL,
+    role        ENUM('owner','member') NOT NULL DEFAULT 'member',
+    joined_at   TIMESTAMP              NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (group_uuid, user_uuid),
+    FOREIGN KEY (group_uuid) REFERENCES kybergroups(group_uuid) ON DELETE CASCADE,
+    FOREIGN KEY (user_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE,
+    -- Fast lookup of "which groups is user X in" for /get_groups.
+    INDEX idx_user (user_uuid)
+);
+
