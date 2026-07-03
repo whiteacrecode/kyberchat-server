@@ -17,6 +17,7 @@ from firebase import firebase_bp
 from recovery import recovery_bp
 from profile import profile_bp
 from media import media_bp
+from groups import groups_bp
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -29,6 +30,7 @@ app.register_blueprint(firebase_bp)
 app.register_blueprint(recovery_bp)
 app.register_blueprint(profile_bp)
 app.register_blueprint(media_bp)
+app.register_blueprint(groups_bp)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
