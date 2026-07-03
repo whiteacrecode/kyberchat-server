@@ -4,18 +4,20 @@
 #
 # Routes (all require PASETO Bearer auth):
 #   GET  /profile           — fetch the authenticated user's own profile
-#   POST /profile/update    — update firstname, lastname, email, phone
+#   POST /profile/update    — update firstname, lastname, email, phone, private
 #
-# Profile data is stored in the `user_profiles` table (see
+# Profile text fields are stored in the `user_profiles` table (see
 # schema/migrations/005_user_profiles.sql).  The avatar image is stored
 # client-side in Firestore (profiles/{userUUID}) — this module only handles
-# the text fields.
+# the text fields plus the `private` discoverability flag, which lives on
+# `users.private` (a different table) rather than `user_profiles`.
 #
 # All fields are optional on update; only supplied fields are modified.
 # Validation:
 #   first_name / last_name : max 64 chars, stripped
 #   email                  : max 254 chars, stripped, basic @ check
 #   phone                  : max 30 chars, digits / spaces / +()-. only
+#   private                : truthy/falsy (bool, "0"/"1", "true"/"false")
 
 import logging
 import re
@@ -93,6 +95,13 @@ def _validate_profile_fields(data: dict) -> tuple[dict, str | None]:
     return cleaned, None
 
 
+def _parse_private(value) -> int:
+    """Coerce a bool/int/str truthy representation of `private` to 0 or 1."""
+    if isinstance(value, bool):
+        return 1 if value else 0
+    return 1 if str(value).strip().lower() in ('1', 'true', 'yes') else 0
+
+
 # ---------------------------------------------------------------------------
 # GET /profile
 # ---------------------------------------------------------------------------
@@ -109,6 +118,7 @@ def get_profile():
         {
             "user_uuid":   "<uuid>",
             "username":    "<username>",
+            "private":     0 | 1,
             "first_name":  "...",
             "last_name":   "...",
             "email":       "...",
@@ -121,9 +131,9 @@ def get_profile():
 
     try:
         with engine.connect() as conn:
-            # Fetch username from users table
+            # Fetch username + privacy flag from users table
             user_row = conn.execute(
-                text("SELECT username FROM users WHERE user_uuid = :u AND deleted = 0"),
+                text("SELECT username, private FROM users WHERE user_uuid = :u AND deleted = 0"),
                 {'u': user_uuid}
             ).fetchone()
 
@@ -148,6 +158,7 @@ def get_profile():
         return jsonify({
             'user_uuid':  user_uuid,
             'username':   user_row[0],
+            'private':    int(user_row[1]),
             'first_name': first_name or '',
             'last_name':  last_name  or '',
             'email':      email      or '',
@@ -175,7 +186,8 @@ def update_profile():
             "first_name": "...",   // optional, max 64 chars
             "last_name":  "...",   // optional, max 64 chars
             "email":      "...",   // optional, max 254 chars, must be valid email or empty
-            "phone":      "..."    // optional, max 30 chars, digits/spaces/+()-. only
+            "phone":      "...",   // optional, max 30 chars, digits/spaces/+()-. only
+            "private":    0|1|true|false|"0"|"1"   // optional — updates users.private
         }
 
     Response 200:
@@ -194,25 +206,25 @@ def update_profile():
         if validation_err:
             return jsonify({'error': validation_err}), 400
 
-        if not cleaned:
+        update_private = 'private' in data
+        private_value  = _parse_private(data['private']) if update_private else None
+
+        if not cleaned and not update_private:
             # Nothing to update — treat as a no-op success
             return jsonify({'message': 'Profile updated'}), 200
 
         # Upsert: create a row if none exists, otherwise update only the
         # supplied columns.  MySQL's INSERT ... ON DUPLICATE KEY UPDATE is
-        # idiomatic here.
-        set_clauses = ", ".join(f"{col} = :{col}" for col in cleaned)
-        params = {**cleaned, 'u': user_uuid}
-
-        insert_cols   = ', '.join(['user_uuid'] + list(cleaned))
-        insert_vals   = ', '.join([':u'] + [f':{col}' for col in cleaned])
-        update_clause = ', '.join(f"{col} = VALUES({col})" for col in cleaned)
-
-        sql = text(f"""
-            INSERT INTO user_profiles (user_uuid, {', '.join(cleaned)})
-            VALUES (:u, {', '.join(':' + c for c in cleaned)})
-            ON DUPLICATE KEY UPDATE {update_clause}
-        """)
+        # idiomatic here. Only built when there are user_profiles columns to
+        # write — `private` lives on `users`, not `user_profiles`.
+        if cleaned:
+            update_clause = ', '.join(f"{col} = VALUES({col})" for col in cleaned)
+            sql = text(f"""
+                INSERT INTO user_profiles (user_uuid, {', '.join(cleaned)})
+                VALUES (:u, {', '.join(':' + c for c in cleaned)})
+                ON DUPLICATE KEY UPDATE {update_clause}
+            """)
+            params = {**cleaned, 'u': user_uuid}
 
         with engine.begin() as conn:
             # Verify user exists
@@ -223,9 +235,19 @@ def update_profile():
             if not row:
                 return jsonify({'error': 'User not found'}), 404
 
-            conn.execute(sql, params)
+            if cleaned:
+                conn.execute(sql, params)
 
-        logger.info("update_profile: updated %s fields for %s", list(cleaned), user_uuid)
+            if update_private:
+                conn.execute(
+                    text("UPDATE users SET private = :p WHERE user_uuid = :u"),
+                    {'p': private_value, 'u': user_uuid}
+                )
+
+        logger.info(
+            "update_profile: updated %s fields (private=%s) for %s",
+            list(cleaned), private_value if update_private else 'unchanged', user_uuid
+        )
         return jsonify({'message': 'Profile updated'}), 200
 
     except Exception as exc:
