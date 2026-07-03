@@ -3,7 +3,7 @@ USE e2e_chat_service;
 
 -- 1. Users Table
 -- Stores basic identity. No PII (Email/Phone) as per requirements.
-CREATE TABLE users (
+CREATE OR REPLACE TABLE users (
     user_uuid CHAR(36) PRIMARY KEY, -- Generated deterministically on client from BIP39 mnemonic seed
     username VARCHAR(50) UNIQUE NOT NULL, -- Human readable ID
     identity_key_public BLOB NOT NULL, -- Long-term X25519 Identity Public Key (IK), 32 bytes
@@ -22,7 +22,7 @@ CREATE TABLE users (
 
 -- 2. Signed Pre-Keys Table
 -- Medium-term keys signed by the Identity Key. Rotated periodically.
-CREATE TABLE signed_pre_keys (
+CREATE OR REPLACE TABLE signed_pre_keys (
     id INT AUTO_INCREMENT PRIMARY KEY,
     user_uuid CHAR(36) NOT NULL,
     key_id INT NOT NULL, -- Client-side identifier for the key
@@ -36,7 +36,7 @@ CREATE TABLE signed_pre_keys (
 -- 3. One-Time Pre-Keys Table
 -- A pool of keys consumed when someone starts a chat with this user.
 -- This is critical for "Asynchronous" key exchange.
-CREATE TABLE one_time_pre_keys (
+CREATE OR REPLACE TABLE one_time_pre_keys (
     id INT AUTO_INCREMENT PRIMARY KEY,
     user_uuid CHAR(36) NOT NULL,
     key_id INT NOT NULL,
@@ -50,7 +50,7 @@ CREATE TABLE one_time_pre_keys (
 -- 4. Devices/Sessions Table
 -- Tracks FCM push tokens per user. Supports multiple devices (multi-device).
 -- Notifications are always sent to the token with the most recent updated_at.
-CREATE TABLE user_devices (
+CREATE OR REPLACE TABLE user_devices (
     device_id INT AUTO_INCREMENT PRIMARY KEY,
     user_uuid CHAR(36) NOT NULL,
     push_token VARCHAR(255) NOT NULL,           -- FCM registration token
@@ -69,7 +69,7 @@ CREATE TABLE user_devices (
 -- Tracks friendship relationships between users.
 -- A row exists for each directional request: requester -> addressee.
 -- status='accepted' means mutual friendship (both sides use this single row).
-CREATE TABLE friends (
+CREATE OR REPLACE TABLE friends (
     id INT AUTO_INCREMENT PRIMARY KEY,
     requester_uuid CHAR(36) NOT NULL,   -- user who sent the friend request
     addressee_uuid CHAR(36) NOT NULL,   -- user who received the friend request
@@ -96,7 +96,7 @@ CREATE TABLE friends (
 --
 -- Compromise of this row alone does not yield key material — an attacker must
 -- still mount an offline PBKDF2 brute-force against the user's password.
-CREATE TABLE recovery_blobs (
+CREATE OR REPLACE TABLE recovery_blobs (
     user_uuid     CHAR(36)      NOT NULL PRIMARY KEY,
     blob_version  INT           NOT NULL DEFAULT 1, -- plaintext schema version (client-controlled)
     ciphertext    LONGBLOB      NOT NULL,           -- AES-256-GCM ciphertext + 16-byte tag appended
@@ -109,5 +109,86 @@ CREATE TABLE recovery_blobs (
         DEFAULT CURRENT_TIMESTAMP
         ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (user_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE
+);
+
+-- 7. Messages Table
+-- Stores encrypted message payloads. The server operates as an opaque relay.
+CREATE OR REPLACE TABLE messages (
+    message_id     CHAR(36)     PRIMARY KEY,
+    sender_uuid    CHAR(36)     NOT NULL,
+    recipient_uuid CHAR(36)     NOT NULL,
+    ciphertext     TEXT         NOT NULL, -- base64-encoded, exactly 1024 bytes decoded
+    created_at     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (sender_uuid)    REFERENCES users(user_uuid) ON DELETE CASCADE,
+    FOREIGN KEY (recipient_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE,
+    INDEX (recipient_uuid, created_at)
+);
+
+-- 8. User Profiles Table
+-- Stores optional profile display data for each user.
+-- All columns nullable — a user may have an account without filling in profile.
+CREATE OR REPLACE TABLE user_profiles (
+    user_uuid  CHAR(36)     NOT NULL PRIMARY KEY,
+    first_name VARCHAR(64)  NULL DEFAULT NULL,
+    last_name  VARCHAR(64)  NULL DEFAULT NULL,
+    -- email is stored here for display purposes only; it is not used for login.
+    -- Users may leave it blank.
+    email      VARCHAR(254) NULL DEFAULT NULL,
+    phone      VARCHAR(30)  NULL DEFAULT NULL,
+    created_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP    NOT NULL
+                   DEFAULT CURRENT_TIMESTAMP
+                   ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE,
+    INDEX idx_user_profiles_email (email),
+    INDEX idx_user_profiles_phone (phone)
+);
+
+-- 9. Media Uploads Table
+-- Tracks GCS ciphertext blobs issued for encrypted audio/video attachments
+-- (Phase 1 of the A/V messaging feature).
+CREATE OR REPLACE TABLE media_uploads (
+    -- Unique identifier for this blob; doubles as the GCS object name suffix.
+    blob_id            CHAR(36)                  NOT NULL,
+
+    -- The user who requested the upload URL (and whose token must be used to
+    -- issue download URLs, or to delete the blob).
+    owner_uuid         CHAR(36)                  NOT NULL,
+
+    -- Broad media category — drives size caps and client-side rendering hints.
+    media_type         ENUM('audio', 'video')    NOT NULL,
+
+    -- MIME type declared by the client (e.g. 'audio/m4a', 'video/mp4').
+    -- Stored for client rendering hints; not enforced server-side.
+    mime_type          VARCHAR(128)              NOT NULL DEFAULT 'application/octet-stream',
+
+    -- Byte count declared by the client at upload-url request time.
+    -- The server enforces a cap on this value; the actual GCS object size may
+    -- differ (the client controls the PUT).  A future sweeper can compare
+    -- declared vs. actual sizes via GCS object metadata.
+    declared_byte_size INT UNSIGNED              NOT NULL,
+
+    -- Full GCS object path, e.g. "media/<uuid>".  Stored so the signed-URL
+    -- issuer and sweeper do not need to reconstruct it from blob_id.
+    gcs_object         VARCHAR(512)              NOT NULL,
+
+    -- When the blob should be considered stale.  The sweeper uses this to find
+    -- objects that can be deleted from GCS and marked deleted here.
+    expires_at         TIMESTAMP                 NOT NULL,
+
+    -- Soft-delete flag.  Set to 1 by DELETE /media/<blob_id> or the sweeper.
+    -- Rows are never hard-deleted so that the sweeper can audit its own work.
+    deleted            TINYINT(1)                NOT NULL DEFAULT 0,
+
+    created_at         TIMESTAMP                 NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY (blob_id),
+    FOREIGN KEY (owner_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE,
+
+    -- Fast lookup of all blobs owned by a user (for quota / list endpoints).
+    INDEX idx_owner (owner_uuid),
+
+    -- Sweeper query: find expired, non-deleted blobs.
+    INDEX idx_expires (expires_at, deleted)
 );
 

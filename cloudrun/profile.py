@@ -41,6 +41,23 @@ _EMAIL_MAX  = 254
 _PHONE_MAX  = 30
 
 
+def normalize_email(email: str) -> str:
+    """Canonical form for email comparisons: trimmed, lowercased."""
+    return email.strip().lower()
+
+
+def normalize_phone(phone: str) -> str:
+    """
+    Canonical form for phone comparisons: digits only, plus a leading '+'
+    if the original number had one (distinguishes +1... from a bare
+    national number that happens to share the same digits).
+    """
+    stripped = phone.strip()
+    plus = '+' if stripped.startswith('+') else ''
+    digits = re.sub(r'\D', '', stripped)
+    return plus + digits
+
+
 def _validate_profile_fields(data: dict) -> tuple[dict, str | None]:
     """
     Validate and sanitise whitelisted profile fields from *data*.
@@ -63,7 +80,7 @@ def _validate_profile_fields(data: dict) -> tuple[dict, str | None]:
             return {}, "email must be a valid email address"
         if len(val) > _EMAIL_MAX:
             return {}, f"email must be at most {_EMAIL_MAX} characters"
-        cleaned['email'] = val
+        cleaned['email'] = normalize_email(val) if val else val
 
     if 'phone' in data:
         val = str(data['phone']).strip()
@@ -71,7 +88,7 @@ def _validate_profile_fields(data: dict) -> tuple[dict, str | None]:
             return {}, "phone contains invalid characters"
         if len(val) > _PHONE_MAX:
             return {}, f"phone must be at most {_PHONE_MAX} characters"
-        cleaned['phone'] = val
+        cleaned['phone'] = normalize_phone(val) if val else val
 
     return cleaned, None
 
