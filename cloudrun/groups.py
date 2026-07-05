@@ -278,9 +278,16 @@ def remove_group_member():
 
         sync_group_membership(group_uuid, remaining_members)
 
-        # Known v1 gap (GROUP_PLAN.md Phase 7): remaining members do not yet
-        # rotate their sender key, so the removed member can still decrypt
-        # messages encrypted with a chain key they already received.
+        # Phase 7 (GROUP_PLAN.md): this push is what drives sender-key
+        # rotation on the client. Each remaining member's device (see
+        # AppDelegate.handleKyberChatPush → GroupsStore.
+        # rotateSenderKeyAfterRemoval) generates a brand new chain key on
+        # receipt and redistributes it over the existing pairwise ratchet
+        # channels, so the removed member's retained chain key only ever
+        # unlocks messages up to this point — nothing sent afterward.
+        # Best-effort like the rest of this handshake: a client that's
+        # offline when this push arrives rotates lazily next time it opens
+        # the Groups tab and its GroupsStore reloads.
         for remaining_uuid in remaining_members:
             notify_user(remaining_uuid, 'GROUP_MEMBER_REMOVED',
                         {'group_uuid': group_uuid, 'member_uuid': member_uuid})
