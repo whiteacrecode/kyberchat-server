@@ -1,4 +1,3 @@
-@ -1,48 +0,0 @@
 -- Migration 011: group metadata (description, searchable, message TTL) + invites
 --
 -- Adds the columns needed to make groups more usable:
@@ -47,4 +46,3 @@ CREATE TABLE IF NOT EXISTS group_invites (
     -- Fast lookup of "which invites are waiting for me" for /groups/invites/pending.
     INDEX idx_invitee (invitee_uuid)
 );
-
