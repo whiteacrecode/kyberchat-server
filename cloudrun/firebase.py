@@ -208,14 +208,18 @@ def send_fcm_notification(push_token: str, data_payload: dict) -> bool:
 
 def sync_group_membership(group_uuid: str, member_uuids: list[str]) -> None:
     """
-    Overwrite groups/{group_uuid} in Firestore with the current member list.
-    Called after create/add/remove/leave so the mirror always reflects the
-    latest MySQL state. Safe to call with the full roster every time —
-    last-write-wins is fine since MySQL is the source of truth.
+    Update the member list on groups/{group_uuid} in Firestore. Called after
+    create/add/remove/leave so the mirror always reflects the latest MySQL
+    state. Safe to call with the full roster every time — last-write-wins is
+    fine since MySQL is the source of truth.
+
+    merge=True is REQUIRED: this doc also carries icon_jpeg_b64 (written by
+    set_group_icon). A plain .set() would drop the icon on every membership
+    change. merge replaces only the `members` field and leaves the icon intact.
     """
     _get_app()
     client = firestore.client()
-    client.collection("groups").document(group_uuid).set({"members": member_uuids})
+    client.collection("groups").document(group_uuid).set({"members": member_uuids}, merge=True)
 
 
 def delete_group_membership_mirror(group_uuid: str) -> None:
