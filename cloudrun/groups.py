@@ -32,6 +32,7 @@ _CREATE_RATE_MAX, _CREATE_RATE_WINDOW = 10, 3600          # 10 groups/hour
 _ADD_MEMBER_RATE_MAX, _ADD_MEMBER_RATE_WINDOW = 30, 3600  # 30 adds/hour
 _INVITE_RATE_MAX, _INVITE_RATE_WINDOW = 30, 3600          # 30 invites/hour
 _SEARCH_RATE_MAX, _SEARCH_RATE_WINDOW = 20, 3600          # 20 searches/hour
+_JOIN_RATE_MAX, _JOIN_RATE_WINDOW = 20, 3600              # 20 self-joins/hour
 
 GROUPS_SEARCH_PAGE_SIZE = 20
 
@@ -1089,6 +1090,93 @@ def search_groups():
 
     except Exception as e:
         logger.error(f"Error searching groups: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+@groups_bp.route('/groups/join', methods=['POST'])
+def join_group():
+    """
+    Self-service join for a discoverable group. This is the counterpart to
+    /groups/search: any group the owner opts into search (searchable=1) is
+    also open to be joined directly, with no owner-approval step. This is the
+    deliberate v1 semantic — "discoverable" means "open-join". If a future
+    version needs an approval gate, this insert is what a join-request table
+    would come to guard.
+
+    Contrast with the other join paths:
+      • /groups/members/add   — owner adds an existing friend directly
+      • /groups/invite/accept — invitee accepts an owner-initiated invite
+      • /groups/join          — requester joins an opted-in public group (here)
+
+    Rate limit: 20 joins per hour per user.
+
+    Request body: { "group_uuid": "..." }
+    Headers:      Authorization: Bearer <token>
+
+    Returns:
+      200 { "message": "Joined group", "group_uuid": "..." }
+      400 group is full / already a member
+      403 group is not open to join (searchable=0)
+      404 group not found
+      429 rate limit exceeded
+    """
+    try:
+        user_uuid, err = verify_token(request)
+        if err:
+            return jsonify(err[0]), err[1]
+
+        if not check_rate_limit_for('group_join', user_uuid, _JOIN_RATE_MAX, _JOIN_RATE_WINDOW):
+            return jsonify({'error': 'Rate limit exceeded. Try again later.'}), 429
+
+        data = request.get_json()
+        if not data or 'group_uuid' not in data:
+            return jsonify({'error': 'Missing group_uuid'}), 400
+
+        group_uuid = data['group_uuid']
+
+        with engine.begin() as conn:
+            group = conn.execute(
+                text("SELECT searchable FROM kybergroups WHERE group_uuid = :g AND deleted = 0"),
+                {'g': group_uuid}
+            ).fetchone()
+            if not group:
+                return jsonify({'error': 'Group not found'}), 404
+
+            # Only discoverable groups are self-joinable. A non-searchable
+            # group is joinable only by owner-add or accepted invite.
+            if not group[0]:
+                return jsonify({'error': 'This group is not open to join'}), 403
+
+            existing_members = _fetch_member_uuids(conn, group_uuid)
+            if user_uuid in existing_members:
+                return jsonify({'error': 'Already a member'}), 400
+            if len(existing_members) + 1 > MAX_GROUP_MEMBERS:
+                return jsonify({'error': f'Groups are limited to {MAX_GROUP_MEMBERS} members'}), 400
+
+            conn.execute(text("""
+                INSERT INTO group_members (group_uuid, user_uuid, role)
+                VALUES (:g, :u, 'member')
+            """), {'g': group_uuid, 'u': user_uuid})
+
+            updated_members = existing_members + [user_uuid]
+
+        sync_group_membership(group_uuid, updated_members)
+
+        # Existing members redistribute their sender key on GROUP_MEMBER_ADDED
+        # (Phase 7); the joiner gets GROUP_JOINED, which falls under the generic
+        # GROUP_ prefix refresh in AppDelegate.
+        for existing_uuid in existing_members:
+            notify_user(existing_uuid, 'GROUP_MEMBER_ADDED',
+                        {'group_uuid': group_uuid, 'member_uuid': user_uuid})
+        notify_user(user_uuid, 'GROUP_JOINED', {'group_uuid': group_uuid})
+
+        logger.info(f"Group joined (self-service): {user_uuid} joined {group_uuid}")
+        return jsonify({'message': 'Joined group', 'group_uuid': group_uuid}), 200
+
+    except IntegrityError:
+        return jsonify({'error': 'Already a member'}), 400
+    except Exception as e:
+        logger.error(f"Error joining group: {e}")
         return jsonify({'error': 'Internal server error'}), 500
 
 
