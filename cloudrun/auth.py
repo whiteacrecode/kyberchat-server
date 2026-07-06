@@ -86,7 +86,7 @@ def verify_token(request) -> tuple:
 
         return payload['sub'], None
 
-    except (pyseto.PasetoException, ValueError, KeyError) as e:
+    except (pyseto.PysetoError, ValueError, KeyError) as e:
         logger.warning(f"PASETO verification failed: {e}")
         return None, ({'error': 'Invalid token'}, 401)
     except Exception as e:
