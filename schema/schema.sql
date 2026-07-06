@@ -246,3 +246,24 @@ CREATE OR REPLACE TABLE group_invites (
     INDEX idx_invitee (invitee_uuid)
 );
 
+-- 13. Location Shares Table
+-- Controls authorization and lifespans for real-time E2EE location shares.
+-- Coordinates are never stored in MySQL; this table only tracks metadata.
+CREATE OR REPLACE TABLE location_shares (
+    share_uuid   CHAR(36)     PRIMARY KEY, -- client-generated UUID v4
+    grantor_uuid CHAR(36)     NOT NULL,    -- user sharing location
+    grantee_uuid CHAR(36)     NULL,        -- target friend allowed to view
+    group_uuid   CHAR(36)     NULL,        -- target group allowed to view
+    is_active    TINYINT(1)   NOT NULL DEFAULT 1, -- 1 = active, 0 = stopped/expired
+    expires_at   TIMESTAMP    NOT NULL,    -- automated expiration timestamp
+    created_at   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (grantor_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE,
+    FOREIGN KEY (grantee_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE,
+    FOREIGN KEY (group_uuid)   REFERENCES kybergroups(group_uuid) ON DELETE CASCADE,
+    CONSTRAINT chk_recipient CHECK (grantee_uuid IS NOT NULL OR group_uuid IS NOT NULL),
+    INDEX idx_location_grantor_active (grantor_uuid, is_active),
+    INDEX idx_location_grantee_active (grantee_uuid, is_active),
+    INDEX idx_location_group_active   (group_uuid, is_active)
+);
+
