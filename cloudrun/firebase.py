@@ -259,6 +259,38 @@ def set_group_icon(group_uuid: str, icon_jpeg_b64: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Location sharing mirrors
+# ---------------------------------------------------------------------------
+
+def sync_location_share(share_uuid: str, grantor_uuid: str, grantee_uuid: str | None, group_uuid: str | None, expires_at) -> None:
+    """
+    Mirror location share metadata to Firestore to enable real-time
+    Firestore security rule checks.
+    `expires_at` is a datetime.datetime object.
+    """
+    _get_app()
+    client = firestore.client()
+    client.collection("location_shares").document(share_uuid).set({
+        "grantor_id": grantor_uuid,
+        "grantee_id": grantee_uuid,
+        "group_id": group_uuid,
+        "expires_at": expires_at,
+        "is_active": True
+    })
+
+
+def delete_location_share_mirror(share_uuid: str) -> None:
+    """
+    Remove groups/{group_uuid} from Firestore. Once gone, the group_conversations
+    security rule's get() lookup fails closed (Firestore rules deny on
+    exceptions), so nobody can read/write that group's messages any more.
+    """
+    _get_app()
+    client = firestore.client()
+    client.collection("location_shares").document(share_uuid).delete()
+
+
+# ---------------------------------------------------------------------------
 # Cloud Run SA setup (run once; idempotent)
 # ---------------------------------------------------------------------------
 #
