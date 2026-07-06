@@ -230,6 +230,31 @@ def delete_group_membership_mirror(group_uuid: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Group icon (Phase B of the group-chat completion plan — GROUP_COMPLETION_PLAN.md)
+# ---------------------------------------------------------------------------
+#
+# Piggybacks on the same groups/{group_uuid} membership-mirror doc rather
+# than a new collection: it's already read-restricted to members via
+# firestore.rules (`request.auth.uid in resource.data.members`), and writes
+# already go exclusively through the Admin SDK (`allow write: if false`), so
+# there's no new security-rule surface to add. This is stricter than the
+# equivalent user-avatar storage (profiles/{userUUID}, globally readable) —
+# a group's icon is only visible to its members.
+
+def set_group_icon(group_uuid: str, icon_jpeg_b64: str | None) -> None:
+    """
+    Sets (or clears, when *icon_jpeg_b64* is None) the group's icon.
+    Uses merge=True so the `members` field written by sync_group_membership()
+    is left untouched. Called by POST /groups/icon (owner-only, see groups.py).
+    """
+    _get_app()
+    client = firestore.client()
+    client.collection("groups").document(group_uuid).set(
+        {"icon_jpeg_b64": icon_jpeg_b64}, merge=True
+    )
+
+
+# ---------------------------------------------------------------------------
 # Cloud Run SA setup (run once; idempotent)
 # ---------------------------------------------------------------------------
 #
