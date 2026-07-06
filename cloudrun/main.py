@@ -19,6 +19,7 @@ from profile import profile_bp
 from media import media_bp
 from groups import groups_bp
 from location import location_bp
+from webrtc import webrtc_bp
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -33,6 +34,7 @@ app.register_blueprint(profile_bp)
 app.register_blueprint(media_bp)
 app.register_blueprint(groups_bp)
 app.register_blueprint(location_bp)
+app.register_blueprint(webrtc_bp)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
