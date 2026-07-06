@@ -197,12 +197,19 @@ CREATE OR REPLACE TABLE media_uploads (
 -- currently transfer. See GROUP_PLAN.md for the full group-chat design.
 -- Named `kybergroups`, not `groups` — GROUPS is a reserved word in MySQL 8.
 CREATE OR REPLACE TABLE kybergroups (
-    group_uuid   CHAR(36)     PRIMARY KEY, -- client-generated UUID v4
-    group_name   VARCHAR(100) NOT NULL,
-    owner_uuid   CHAR(36)     NOT NULL,
-    created_at   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    deleted      INT          NOT NULL DEFAULT 0, -- 0 = active, 1 = soft-deleted
-    FOREIGN KEY (owner_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE
+    group_uuid          CHAR(36)     PRIMARY KEY, -- client-generated UUID v4
+    group_name          VARCHAR(100) NOT NULL,
+    owner_uuid          CHAR(36)     NOT NULL,
+    description         VARCHAR(500) NULL,
+    searchable          TINYINT(1)   NOT NULL DEFAULT 0,
+    message_ttl_seconds INT          NULL,
+    created_at          TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted             INT          NOT NULL DEFAULT 0, -- 0 = active, 1 = soft-deleted
+    FOREIGN KEY (owner_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE,
+    -- Narrows the scan for POST /groups/search before the LIKE match on
+    -- group_name/description (neither of which can use a plain B-tree index
+    -- for a leading-wildcard LIKE).
+    INDEX idx_kybergroups_searchable (searchable)
 );
 
 -- 11. Group Members Table
@@ -219,5 +226,23 @@ CREATE OR REPLACE TABLE group_members (
     FOREIGN KEY (user_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE,
     -- Fast lookup of "which groups is user X in" for /get_groups.
     INDEX idx_user (user_uuid)
+);
+
+-- 12. Group Invites Table
+-- Pending group invites. A row here means invitee_uuid has been invited to
+-- group_uuid and has not yet responded. Both accept and decline delete the
+-- row outright (mirrors friends.decline_friend_request) — there is no
+-- retained "declined" state, so the same user can be re-invited later.
+CREATE OR REPLACE TABLE group_invites (
+    group_uuid   CHAR(36)  NOT NULL,
+    invitee_uuid CHAR(36)  NOT NULL,
+    inviter_uuid CHAR(36)  NOT NULL,
+    created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (group_uuid, invitee_uuid),
+    FOREIGN KEY (group_uuid) REFERENCES kybergroups(group_uuid) ON DELETE CASCADE,
+    FOREIGN KEY (invitee_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE,
+    FOREIGN KEY (inviter_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE,
+    -- Fast lookup of "which invites are waiting for me" for /groups/invites/pending.
+    INDEX idx_invitee (invitee_uuid)
 );
 
