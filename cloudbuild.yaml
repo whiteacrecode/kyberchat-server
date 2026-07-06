@@ -71,9 +71,13 @@ steps:
       - --allow-unauthenticated          # public API; remove if adding Cloud Run IAM auth
       - --add-cloudsql-instances=$_CLOUDSQL_INST
       - --set-env-vars=DB_HOST=/cloudsql/$_CLOUDSQL_INST,DB_NAME=$_DB_NAME
-      # REDIS_URL points at the private Memorystore IP (redis://10.167.56.211:6379).
-      # Stored in Secret Manager as 'redis-url'.
-      - --set-secrets=REDIS_URL=redis-url:latest
+      # --set-secrets REPLACES the whole secret set on every deploy, so ALL
+      # secrets the service needs must be listed here or they get dropped:
+      #   DB_USER / DB_PASS   — Cloud SQL credentials (without them the app
+      #                         falls back to root/no-password → login 500s)
+      #   PASETO_SECRET       — token signing key
+      #   REDIS_URL           — private Memorystore IP (redis://10.167.56.211:6379)
+      - --set-secrets=DB_USER=db-user:latest,DB_PASS=db-pass:latest,PASETO_SECRET=paseto-secret:latest,REDIS_URL=redis-url:latest
       # Serverless VPC connector 'quantchat-redis' (range 10.100.0.0/28) is REQUIRED
       # to reach the private Memorystore IP. Without it, every Redis call times out.
       # Firewall rule 'allow-vpcconnector-to-redis' permits 10.100.0.0/28 -> tcp:6379.
