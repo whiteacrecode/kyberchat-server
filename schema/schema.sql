@@ -267,3 +267,22 @@ CREATE OR REPLACE TABLE location_shares (
     INDEX idx_location_group_active   (group_uuid, is_active)
 );
 
+-- 14. Location Sharing Preferences Table
+-- A durable, per-(user, friend) toggle recording whether a user is willing to
+-- share their live location with a specific friend. Distinct from
+-- location_shares: that table holds ephemeral, expiring ACTIVE sessions; this
+-- one holds a persistent preference the user sets once. Holds no coordinates —
+-- pure access-control metadata, consistent with the zero-knowledge model.
+CREATE OR REPLACE TABLE location_share_prefs (
+    grantor_uuid  CHAR(36)   NOT NULL,   -- user who owns the preference
+    friend_uuid   CHAR(36)   NOT NULL,   -- friend they choose to share with
+    share_enabled TINYINT(1) NOT NULL DEFAULT 0, -- 1 = willing to share, 0 = not
+    created_at    TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (grantor_uuid, friend_uuid),
+    FOREIGN KEY (grantor_uuid) REFERENCES users(user_uuid) ON DELETE CASCADE,
+    FOREIGN KEY (friend_uuid)  REFERENCES users(user_uuid) ON DELETE CASCADE,
+    -- "who is willing to share with me" lookups (reverse direction)
+    INDEX idx_lsp_friend (friend_uuid, share_enabled)
+);
+

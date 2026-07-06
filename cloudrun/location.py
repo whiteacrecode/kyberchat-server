@@ -26,6 +26,23 @@ location_bp = Blueprint('location', __name__)
 logger = logging.getLogger(__name__)
 
 
+def user_shares_location_with(conn, grantor_uuid: str, grantee_uuid: str) -> bool:
+    """
+    Returns True if `grantor_uuid` has an enabled per-friend location-sharing
+    preference toward `grantee_uuid`.
+
+    This is the single source of truth for "does user A share location with
+    user B?" — a durable preference, independent of whether an ephemeral
+    location_shares session is currently active. Callers pass an open
+    SQLAlchemy connection so the check can compose inside a larger transaction.
+    """
+    row = conn.execute(text("""
+        SELECT share_enabled FROM location_share_prefs
+        WHERE grantor_uuid = :grantor AND friend_uuid = :grantee
+    """), {'grantor': grantor_uuid, 'grantee': grantee_uuid}).fetchone()
+    return bool(row and row[0])
+
+
 @location_bp.route('/location/share', methods=['POST'])
 def start_location_share():
     """
@@ -244,4 +261,120 @@ def get_active_location_shares():
 
     except Exception as e:
         logger.error(f"Error fetching active location shares: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+@location_bp.route('/location/preference', methods=['POST'])
+def set_location_share_preference():
+    """
+    Sets (or clears) the authenticated user's durable preference to share their
+    live location with a specific friend. This is a persistent per-friend toggle,
+    distinct from the ephemeral, time-boxed sessions in POST /location/share.
+
+    The friend must be an accepted friend of the caller.
+
+    Request:
+      {
+        "friend_uuid": "<uuid>",
+        "share_enabled": true | false
+      }
+
+    Returns:
+      200 { "friend_uuid": "<uuid>", "share_enabled": true|false }
+      400 missing/invalid field · 403 not accepted friends · 404 friend not found
+    """
+    try:
+        grantor_uuid, err = verify_token(request)
+        if err:
+            return jsonify(err[0]), err[1]
+
+        data = request.get_json()
+        if not data or 'friend_uuid' not in data:
+            return jsonify({'error': 'Missing friend_uuid'}), 400
+        if 'share_enabled' not in data:
+            return jsonify({'error': 'Missing share_enabled'}), 400
+
+        friend_uuid = data['friend_uuid']
+        share_enabled = data['share_enabled']
+
+        if not isinstance(share_enabled, bool):
+            return jsonify({'error': 'share_enabled must be a boolean'}), 400
+
+        if friend_uuid == grantor_uuid:
+            return jsonify({'error': 'Cannot set a location preference for yourself'}), 400
+
+        with engine.begin() as conn:
+            # 1. Validate the friend exists and is active
+            user_check = conn.execute(text("""
+                SELECT user_uuid FROM users WHERE user_uuid = :uuid AND deleted = 0
+            """), {'uuid': friend_uuid}).fetchone()
+            if not user_check:
+                return jsonify({'error': 'Friend not found or deleted'}), 404
+
+            # 2. Validate an accepted friendship exists (either direction)
+            friend_check = conn.execute(text("""
+                SELECT 1 FROM friends
+                WHERE ((requester_uuid = :grantor AND addressee_uuid = :friend)
+                   OR (requester_uuid = :friend AND addressee_uuid = :grantor))
+                  AND status = 'accepted'
+            """), {'grantor': grantor_uuid, 'friend': friend_uuid}).fetchone()
+            if not friend_check:
+                return jsonify({'error': 'You must be accepted friends to share location'}), 403
+
+            # 3. Upsert the preference
+            conn.execute(text("""
+                INSERT INTO location_share_prefs (grantor_uuid, friend_uuid, share_enabled)
+                VALUES (:grantor, :friend, :enabled)
+                ON DUPLICATE KEY UPDATE share_enabled = :enabled
+            """), {'grantor': grantor_uuid, 'friend': friend_uuid, 'enabled': 1 if share_enabled else 0})
+
+        logger.info(f"Location share preference set: {grantor_uuid} -> {friend_uuid} = {share_enabled}")
+        return jsonify({'friend_uuid': friend_uuid, 'share_enabled': share_enabled}), 200
+
+    except Exception as e:
+        logger.error(f"Error setting location share preference: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+@location_bp.route('/location/preference/status', methods=['POST'])
+def get_location_share_preference():
+    """
+    Reports whether the authenticated user shares their location with a friend,
+    and whether that friend shares theirs back — the two independent per-friend
+    preferences that back the conversation-menu toggle.
+
+    Request:
+      { "friend_uuid": "<uuid>" }
+
+    Returns:
+      200 {
+            "friend_uuid": "<uuid>",
+            "i_share_with_them": true|false,   -- caller's own toggle
+            "they_share_with_me": true|false   -- friend's toggle toward caller
+          }
+      400 missing friend_uuid
+    """
+    try:
+        user_uuid, err = verify_token(request)
+        if err:
+            return jsonify(err[0]), err[1]
+
+        data = request.get_json()
+        if not data or 'friend_uuid' not in data:
+            return jsonify({'error': 'Missing friend_uuid'}), 400
+
+        friend_uuid = data['friend_uuid']
+
+        with engine.connect() as conn:
+            i_share = user_shares_location_with(conn, user_uuid, friend_uuid)
+            they_share = user_shares_location_with(conn, friend_uuid, user_uuid)
+
+        return jsonify({
+            'friend_uuid': friend_uuid,
+            'i_share_with_them': i_share,
+            'they_share_with_me': they_share
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error fetching location share preference: {e}")
         return jsonify({'error': 'Internal server error'}), 500
