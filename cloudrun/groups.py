@@ -6,7 +6,7 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.exc import IntegrityError
 
 from db import engine
-from auth import verify_token
+from auth import verify_token, canonical_uuid
 from cache import check_rate_limit_for
 from notifications import notify_user
 from firebase import sync_group_membership, delete_group_membership_mirror, set_group_icon
@@ -129,8 +129,8 @@ def create_group():
                 return jsonify({'error': 'message_ttl_seconds must be a non-negative integer or null'}), 400
 
         member_uuids = list({
-            u for u in (data.get('member_uuids') or [])
-            if u and u != owner_uuid
+            cu for cu in (canonical_uuid(u) for u in (data.get('member_uuids') or []))
+            if cu and cu != owner_uuid
         })
 
         if len(member_uuids) + 1 > MAX_GROUP_MEMBERS:
@@ -227,7 +227,7 @@ def add_group_member():
             return jsonify({'error': 'Missing group_uuid or member_uuid'}), 400
 
         group_uuid = data['group_uuid']
-        member_uuid = data['member_uuid']
+        member_uuid = canonical_uuid(data['member_uuid'])
 
         with engine.begin() as conn:
             group = conn.execute(
@@ -306,7 +306,7 @@ def remove_group_member():
             return jsonify({'error': 'Missing group_uuid or member_uuid'}), 400
 
         group_uuid = data['group_uuid']
-        member_uuid = data['member_uuid']
+        member_uuid = canonical_uuid(data['member_uuid'])
 
         with engine.begin() as conn:
             group = conn.execute(
@@ -714,7 +714,7 @@ def invite_to_group():
             if not target:
                 return jsonify({'error': 'User not found'}), 404
 
-            invitee_uuid = target[0]
+            invitee_uuid = canonical_uuid(target[0])
 
             if invitee_uuid == caller_uuid:
                 return jsonify({'error': 'Cannot invite yourself'}), 400
@@ -949,7 +949,7 @@ def set_group_member_role():
             return jsonify({'error': 'Missing group_uuid, member_uuid, or role'}), 400
 
         group_uuid = data['group_uuid']
-        member_uuid = data['member_uuid']
+        member_uuid = canonical_uuid(data['member_uuid'])
         role = data['role']
 
         if role not in ('owner', 'member'):

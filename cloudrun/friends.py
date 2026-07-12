@@ -4,7 +4,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from db import engine
-from auth import verify_token
+from auth import verify_token, canonical_uuid
 from cache import check_rate_limit
 from notifications import notify_user
 
@@ -56,7 +56,9 @@ def get_friends():
 
         friends = [
             {
-                'user_uuid': row[0],
+                # Canonicalise so the client builds chatId from a lowercase
+                # peer uuid even if a pre-migration row is still uppercase.
+                'user_uuid': canonical_uuid(row[0]),
                 'username': row[1],
                 'identity_key_public': row[2].hex() if row[2] else None,
                 'registration_id': row[3],
@@ -120,7 +122,7 @@ def send_friend_request():
             if not target:
                 return jsonify({'error': 'User not found'}), 404
 
-            addressee_uuid = target[0]
+            addressee_uuid = canonical_uuid(target[0])
 
             if addressee_uuid == requester_uuid:
                 return jsonify({'error': 'Cannot send a friend request to yourself'}), 400
@@ -192,7 +194,7 @@ def get_pending_friend_requests():
 
         requests = [
             {
-                'requester_uuid': row[0],
+                'requester_uuid': canonical_uuid(row[0]),
                 'username': row[1],
                 'created_at': row[2].isoformat() if row[2] else None
             }
@@ -229,7 +231,7 @@ def decline_friend_request():
         if not data or 'requester_uuid' not in data:
             return jsonify({'error': 'Missing requester_uuid'}), 400
 
-        requester_uuid = data['requester_uuid']
+        requester_uuid = canonical_uuid(data['requester_uuid'])
 
         with engine.begin() as conn:
             result = conn.execute(text("""
@@ -274,7 +276,7 @@ def accept_friend_request():
         if not data or 'requester_uuid' not in data:
             return jsonify({'error': 'Missing requester_uuid'}), 400
 
-        requester_uuid = data['requester_uuid']
+        requester_uuid = canonical_uuid(data['requester_uuid'])
 
         with engine.begin() as conn:
             result = conn.execute(text("""
@@ -325,7 +327,7 @@ def accept_preview():
         if not data or 'requester_uuid' not in data:
             return jsonify({'error': 'Missing requester_uuid'}), 400
 
-        requester_uuid = data['requester_uuid']
+        requester_uuid = canonical_uuid(data['requester_uuid'])
 
         if requester_uuid == accepter_uuid:
             return jsonify({'error': 'Cannot accept a request from yourself'}), 400
@@ -394,7 +396,7 @@ def remove_friend():
         if not data or 'friend_uuid' not in data:
             return jsonify({'error': 'Missing friend_uuid'}), 400
 
-        friend_uuid = data['friend_uuid']
+        friend_uuid = canonical_uuid(data['friend_uuid'])
 
         if friend_uuid == user_uuid:
             return jsonify({'error': 'Cannot remove yourself'}), 400

@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from flask import Blueprint, request, jsonify
 from sqlalchemy import text
 
-from auth import verify_token
+from auth import verify_token, canonical_uuid
 from db import engine
 from firebase import sync_location_share, delete_location_share_mirror
 
@@ -66,7 +66,7 @@ def start_location_share():
         if not data:
             return jsonify({'error': 'Invalid JSON'}), 400
 
-        grantee_uuid = data.get('grantee_uuid')
+        grantee_uuid = canonical_uuid(data.get('grantee_uuid'))
         group_uuid = data.get('group_uuid')
         duration_hours = data.get('duration_hours', 1)
 

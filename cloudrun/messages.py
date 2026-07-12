@@ -5,7 +5,7 @@ import uuid as uuid_module
 from flask import Blueprint, request, jsonify
 from sqlalchemy import text
 
-from auth import verify_token
+from auth import verify_token, canonical_uuid
 from db import engine
 from notifications import notify_user
 
@@ -58,7 +58,7 @@ def send_message():
             if field not in data:
                 return jsonify({'error': f'Missing field: {field}'}), 400
 
-        recipient_uuid = data['recipient_uuid']
+        recipient_uuid = canonical_uuid(data['recipient_uuid'])
 
         if recipient_uuid == sender_uuid:
             return jsonify({'error': 'Cannot send a message to yourself'}), 400

@@ -4,7 +4,7 @@ from flask import Blueprint, request, jsonify
 from sqlalchemy import text
 
 from db import engine
-from auth import verify_token
+from auth import verify_token, canonical_uuid
 from cache import check_rate_limit, check_rate_limit_for
 from notifications import notify_user
 from profile import normalize_email, normalize_phone
@@ -63,7 +63,7 @@ def lookup_user():
         if not row:
             return jsonify({'error': 'User not found'}), 404
 
-        return jsonify({'user_uuid': row[0], 'username': row[1]}), 200
+        return jsonify({'user_uuid': canonical_uuid(row[0]), 'username': row[1]}), 200
 
     except Exception as e:
         logger.error(f"Error in lookup_user: {e}")
@@ -124,6 +124,7 @@ def search_user():
                 return jsonify({'error': 'User not found'}), 404
 
             target_uuid, target_username_db, target_private = target
+            target_uuid = canonical_uuid(target_uuid)
 
             if target_uuid == requester_uuid:
                 return jsonify({'error': 'Cannot search for yourself'}), 400
@@ -274,7 +275,7 @@ def search_users():
                     if email and target_email == email:
                         matched_fields.append('email')
                     results.append({
-                        'user_uuid': target_uuid,
+                        'user_uuid': canonical_uuid(target_uuid),
                         'username': target_username,
                         'private': 0,
                         'status': status,

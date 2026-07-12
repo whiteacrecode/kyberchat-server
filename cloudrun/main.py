@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHashError
 
 from db import engine, ph
-from auth import issue_token, verify_token
+from auth import issue_token, verify_token, canonical_uuid
 from cache import set_heartbeat
 from friends import friends_bp
 from e2e import e2e_bp
@@ -56,7 +56,11 @@ def create_user():
             if field not in data:
                 return jsonify({'error': f'Missing field: {field}'}), 400
 
-        user_uuid = data['user_uuid']
+        # Canonicalise to lowercase at the storage boundary. Foundation's
+        # UUID.uuidString is uppercase; older client paths were lowercase.
+        # Storing the canonical form keeps chatId / Firebase-uid / rule
+        # comparisons consistent for every new account. See auth.canonical_uuid.
+        user_uuid = canonical_uuid(data['user_uuid'])
         username = data['username']
         password = data['password']
 
