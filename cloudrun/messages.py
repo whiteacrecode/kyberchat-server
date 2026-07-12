@@ -12,24 +12,34 @@ from notifications import notify_user
 messages_bp = Blueprint('messages', __name__)
 logger = logging.getLogger(__name__)
 
-CIPHERTEXT_SIZE = 1024  # bytes — fixed-size E2EE payload
+# Accepted fixed ciphertext sizes ("padding tiers"), in bytes. Every E2EE payload
+# is padded to *exactly* one of these before base64-encoding, so the wire length
+# leaks nothing about the plaintext. The server stays zero-knowledge: it validates
+# only that the decoded length is a known tier — it never inspects the contents.
+#   • Tier-1 (1024)  — text messages, key handshakes, short envelopes.
+#   • Tier-2 (4096)  — WebRTC signaling (SDP offers/answers, ICE) which is larger.
+CIPHERTEXT_SIZE = 1024            # Tier-1
+CIPHERTEXT_SIZE_SIGNALING = 4096  # Tier-2
+VALID_CIPHERTEXT_SIZES = (CIPHERTEXT_SIZE, CIPHERTEXT_SIZE_SIGNALING)
 
 
 @messages_bp.route('/messages/send', methods=['POST'])
 def send_message():
     """
-    Stores a 1024-byte E2EE ciphertext in MySQL and notifies the recipient
+    Stores a fixed-size E2EE ciphertext in MySQL and notifies the recipient
     via FCM.
 
     The server never sees plaintext — it relays opaque encrypted blobs only.
-    Fixed-size payloads prevent traffic-analysis leaks about message length.
+    Every payload is padded to one of the fixed tiers (Tier-1 = 1024 bytes for
+    text, Tier-2 = 4096 bytes for WebRTC signaling) so its length leaks nothing
+    about the plaintext. The server only checks the tier, never the contents.
 
     Authentication: Bearer JWT.
 
     Request body:
       {
         "recipient_uuid": "<uuid>",
-        "ciphertext": "<base64-encoded 1024-byte blob>"
+        "ciphertext": "<base64-encoded 1024- or 4096-byte blob>"
       }
 
     Returns:
@@ -58,9 +68,10 @@ def send_message():
         except Exception:
             return jsonify({'error': 'ciphertext must be valid base64'}), 400
 
-        if len(raw) != CIPHERTEXT_SIZE:
+        if len(raw) not in VALID_CIPHERTEXT_SIZES:
+            allowed = ' or '.join(str(s) for s in VALID_CIPHERTEXT_SIZES)
             return jsonify({
-                'error': f'ciphertext must be exactly {CIPHERTEXT_SIZE} bytes, got {len(raw)}'
+                'error': f'ciphertext must be exactly {allowed} bytes, got {len(raw)}'
             }), 400
 
         with engine.begin() as conn:
