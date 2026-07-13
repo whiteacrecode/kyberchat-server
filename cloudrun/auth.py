@@ -16,6 +16,21 @@ TOKEN_EXPIRY_DAYS = 7  # Mobile clients stay logged in for a week
 logger = logging.getLogger(__name__)
 
 
+def canonical_uuid(user_uuid: str) -> str:
+    """
+    Canonical string form of a user_uuid: lowercase, whitespace-stripped.
+
+    Foundation's `UUID.uuidString` (and older client paths) produce
+    inconsistently-cased UUIDs, but every downstream comparison — MySQL
+    lookups, Firebase custom-token uid vs Firestore rules, chatId construction
+    on the client — is exact and case-sensitive. Lowercasing at every server
+    boundary (token verification, token issuance, custom-token minting,
+    user creation, and returned uuids) is the canonicalisation point that keeps
+    all of those aligned. Tolerant of None so callers can pass raw payload values.
+    """
+    return user_uuid.strip().lower() if isinstance(user_uuid, str) else user_uuid
+
+
 def _get_key() -> Key:
     """Returns the cached v4.local symmetric key, initialising it on first call."""
     global _KEY
@@ -46,7 +61,7 @@ def issue_token(user_uuid: str) -> str:
     Called once at login."""
     exp = datetime.now(timezone.utc) + timedelta(days=TOKEN_EXPIRY_DAYS)
     payload = {
-        'sub': user_uuid,
+        'sub': canonical_uuid(user_uuid),
         'exp': exp.isoformat(),
     }
     token = pyseto.encode(_get_key(), json.dumps(payload).encode())
@@ -84,7 +99,12 @@ def verify_token(request) -> tuple:
             logger.warning("PASETO verification failed: token expired")
             return None, ({'error': 'Token expired'}, 401)
 
-        return payload['sub'], None
+        # Canonicalise (lowercase) the subject so that tokens minted before the
+        # UUID lowercase migration — whose `sub` may be uppercase — still resolve
+        # to the migrated (lowercase) MySQL rows and Firestore uid. This is the
+        # compatibility shim that lets the DB migration deploy without breaking
+        # the 7-day window of already-issued tokens.
+        return canonical_uuid(payload['sub']), None
 
     except (pyseto.PysetoError, ValueError, KeyError) as e:
         logger.warning(f"PASETO verification failed: {e}")

@@ -134,8 +134,11 @@ def create_custom_token(user_uuid: str) -> str:
 
     Raises firebase_admin.exceptions.FirebaseError on failure.
     """
+    from auth import canonical_uuid
     _get_app()
-    token = firebase_auth.create_custom_token(user_uuid)
+    # Lowercase so request.auth.uid always matches the canonical (lowercase)
+    # user_uuid embedded in chatId components and Firestore rule comparisons.
+    token = firebase_auth.create_custom_token(canonical_uuid(user_uuid))
     # SDK may return bytes on some versions
     if isinstance(token, bytes):
         return token.decode("utf-8")
@@ -217,9 +220,13 @@ def sync_group_membership(group_uuid: str, member_uuids: list[str]) -> None:
     set_group_icon). A plain .set() would drop the icon on every membership
     change. merge replaces only the `members` field and leaves the icon intact.
     """
+    from auth import canonical_uuid
     _get_app()
     client = firestore.client()
-    client.collection("groups").document(group_uuid).set({"members": member_uuids}, merge=True)
+    # Mirror canonical (lowercase) uuids so `request.auth.uid in members` in
+    # firestore.rules matches the lowercase Firebase custom-token uid.
+    members = [canonical_uuid(m) for m in member_uuids]
+    client.collection("groups").document(group_uuid).set({"members": members}, merge=True)
 
 
 def delete_group_membership_mirror(group_uuid: str) -> None:
