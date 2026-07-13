@@ -69,6 +69,12 @@ def start_location_share():
         grantee_uuid = canonical_uuid(data.get('grantee_uuid'))
         group_uuid = data.get('group_uuid')
         duration_hours = data.get('duration_hours', 1)
+        # Indefinite ("permanent") share: the grantor shares until they
+        # explicitly stop it (POST /location/stop). We still store a concrete,
+        # far-future expires_at so the `expires_at > NOW()` filter in
+        # /location/active — and the client's own expiry-driven teardown —
+        # keep working unchanged; ~10 years is effectively permanent.
+        permanent = bool(data.get('permanent', False))
 
         # Validate exactly one target is provided
         if not grantee_uuid and not group_uuid:
@@ -76,17 +82,21 @@ def start_location_share():
         if grantee_uuid and group_uuid:
             return jsonify({'error': 'Cannot provide both grantee_uuid and group_uuid'}), 400
 
-        # Validate duration_hours
-        try:
-            duration_hours = int(duration_hours)
-            if duration_hours < 1 or duration_hours > 24:
-                raise ValueError()
-        except ValueError:
-            return jsonify({'error': 'duration_hours must be an integer between 1 and 24'}), 400
+        # Validate duration_hours (skipped for a permanent share)
+        if not permanent:
+            try:
+                duration_hours = int(duration_hours)
+                if duration_hours < 1 or duration_hours > 24:
+                    raise ValueError()
+            except ValueError:
+                return jsonify({'error': 'duration_hours must be an integer between 1 and 24'}), 400
 
         share_uuid = str(uuid_module.uuid4())
         # Use offset-naive datetime.utcnow() which SQLAlchemy maps perfectly to TIMESTAMP
-        expires_at = datetime.utcnow() + timedelta(hours=duration_hours)
+        if permanent:
+            expires_at = datetime.utcnow() + timedelta(days=3650)   # ~10 years
+        else:
+            expires_at = datetime.utcnow() + timedelta(hours=duration_hours)
 
         with engine.begin() as conn:
             if grantee_uuid:
